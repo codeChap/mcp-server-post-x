@@ -1,1 +1,0 @@
-cargo:rustc-env=MIME_TYPES_GENERATED_PATH=/media/codechap/4TB/develop/mcps/mcp-server-post-x/target/debug/build/mime_guess-ac9ffee0dfa9dd7a/out/mime_types_generated.rs
