@@ -1,0 +1,14 @@
+/media/codechap/4TB/develop/mcps/mcp-server-post-x/target/release/deps/serde-57b5891ae286022c.d: /home/codechap/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs /home/codechap/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs /home/codechap/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs /home/codechap/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs /home/codechap/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs /media/codechap/4TB/develop/mcps/mcp-server-post-x/target/release/build/serde-bf81c6ab840f58c5/out/private.rs
+
+/media/codechap/4TB/develop/mcps/mcp-server-post-x/target/release/deps/libserde-57b5891ae286022c.rlib: /home/codechap/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs /home/codechap/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs /home/codechap/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs /home/codechap/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs /home/codechap/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs /media/codechap/4TB/develop/mcps/mcp-server-post-x/target/release/build/serde-bf81c6ab840f58c5/out/private.rs
+
+/media/codechap/4TB/develop/mcps/mcp-server-post-x/target/release/deps/libserde-57b5891ae286022c.rmeta: /home/codechap/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs /home/codechap/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs /home/codechap/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs /home/codechap/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs /home/codechap/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs /media/codechap/4TB/develop/mcps/mcp-server-post-x/target/release/build/serde-bf81c6ab840f58c5/out/private.rs
+
+/home/codechap/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs:
+/home/codechap/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs:
+/home/codechap/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs:
+/home/codechap/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs:
+/home/codechap/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs:
+/media/codechap/4TB/develop/mcps/mcp-server-post-x/target/release/build/serde-bf81c6ab840f58c5/out/private.rs:
+
+# env-dep:OUT_DIR=/media/codechap/4TB/develop/mcps/mcp-server-post-x/target/release/build/serde-bf81c6ab840f58c5/out
