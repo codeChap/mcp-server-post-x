@@ -285,6 +285,18 @@ struct LikeData {
     liked: bool,
 }
 
+// --- Delete tweet response types ---
+
+#[derive(Deserialize)]
+struct DeleteTweetResponse {
+    data: DeleteTweetData,
+}
+
+#[derive(Deserialize)]
+struct DeleteTweetData {
+    deleted: bool,
+}
+
 // --- XClient implementation ---
 
 impl XClient {
@@ -742,6 +754,37 @@ impl XClient {
             .map_err(|e| format!("Failed to parse unlike response: {e}"))?;
 
         Ok(response.data.liked)
+    }
+
+    // --- Delete tweet ---
+
+    pub async fn delete_tweet(&self, tweet_id: &str) -> Result<bool, String> {
+        let url = format!("{TWEETS_URL}/{tweet_id}");
+
+        let resp = self
+            .retry_503(|| {
+                let auth = self.oauth_header("DELETE", &url, &BTreeMap::new());
+                self.http.delete(&url).header("Authorization", auth)
+            })
+            .await?;
+
+        self.check_auth_error(&resp);
+        let status = resp.status();
+        if status.as_u16() == 429 {
+            let reset = self.rate_limit_reset(&resp);
+            return Err(format!("Rate limited (429). {reset}Try again later."));
+        }
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!("X API error ({status}): {body}"));
+        }
+
+        let response: DeleteTweetResponse = resp
+            .json()
+            .await
+            .map_err(|e| format!("Failed to parse delete response: {e}"))?;
+
+        Ok(response.data.deleted)
     }
 
     // --- Simple upload (images ≤5MB) ---

@@ -446,6 +446,29 @@ impl PostXServer {
             Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
         }
     }
+
+    #[tool(
+        description = "Delete a tweet on X (Twitter). You can only delete your own tweets. Accepts a tweet ID or tweet URL."
+    )]
+    async fn delete_tweet(
+        &self,
+        Parameters(params): Parameters<TweetIdParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let tweet_id = Self::extract_tweet_id(&params.tweet_id);
+        if tweet_id.is_empty() {
+            return Ok(CallToolResult::error(vec![Content::text(
+                "Tweet ID cannot be empty.",
+            )]));
+        }
+
+        match self.client.delete_tweet(tweet_id).await {
+            Ok(deleted) => {
+                let text = format!("Tweet {tweet_id} deleted: {deleted}");
+                Ok(CallToolResult::success(vec![Content::text(text)]))
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
+        }
+    }
 }
 
 #[tool_handler]
@@ -462,8 +485,9 @@ impl ServerHandler for PostXServer {
                 website_url: None,
             },
             instructions: Some(
-                "X (Twitter) server. Tools: post_tweet, upload_media, post_thread, \
-                 get_me, get_followers, get_following, lookup_user, like_tweet, unlike_tweet."
+                "X (Twitter) server. Tools: post_tweet, post_thread, upload_media, \
+                 delete_tweet, get_me, lookup_user, get_followers, get_following, \
+                 like_tweet, unlike_tweet."
                     .to_string(),
             ),
         }
