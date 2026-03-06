@@ -510,6 +510,62 @@ impl PostXServer {
     }
 
     #[tool(
+        description = "Retweet a tweet on X (Twitter). Accepts a tweet ID or tweet URL."
+    )]
+    async fn retweet(
+        &self,
+        Parameters(params): Parameters<TweetIdParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let tweet_id = Self::extract_tweet_id(&params.tweet_id);
+        if tweet_id.is_empty() {
+            return Ok(CallToolResult::error(vec![Content::text(
+                "Tweet ID cannot be empty.",
+            )]));
+        }
+
+        let me = match self.ensure_me().await {
+            Ok(me) => me,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+        };
+
+        match self.client.retweet(&me.id, tweet_id).await {
+            Ok(retweeted) => {
+                let text = format!("Tweet {tweet_id} retweeted: {retweeted}");
+                Ok(CallToolResult::success(vec![Content::text(text)]))
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
+        }
+    }
+
+    #[tool(
+        description = "Undo a retweet on X (Twitter). Accepts a tweet ID or tweet URL."
+    )]
+    async fn unretweet(
+        &self,
+        Parameters(params): Parameters<TweetIdParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let tweet_id = Self::extract_tweet_id(&params.tweet_id);
+        if tweet_id.is_empty() {
+            return Ok(CallToolResult::error(vec![Content::text(
+                "Tweet ID cannot be empty.",
+            )]));
+        }
+
+        let me = match self.ensure_me().await {
+            Ok(me) => me,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+        };
+
+        match self.client.unretweet(&me.id, tweet_id).await {
+            Ok(retweeted) => {
+                let text = format!("Tweet {tweet_id} unretweeted (retweeted: {retweeted})");
+                Ok(CallToolResult::success(vec![Content::text(text)]))
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
+        }
+    }
+
+    #[tool(
         description = "Search recent tweets on X (Twitter) from the last 7 days. Supports operators: from:user, #hashtag, @mention, \"exact phrase\", -exclude, lang:en, etc."
     )]
     async fn search_tweets(
@@ -557,7 +613,7 @@ impl ServerHandler for PostXServer {
             instructions: Some(
                 "X (Twitter) server. Tools: post_tweet, post_thread, upload_media, \
                  delete_tweet, search_tweets, get_me, lookup_user, get_followers, \
-                 get_following, like_tweet, unlike_tweet."
+                 get_following, like_tweet, unlike_tweet, retweet, unretweet."
                     .to_string(),
             ),
         }

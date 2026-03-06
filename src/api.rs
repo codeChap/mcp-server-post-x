@@ -297,6 +297,18 @@ struct DeleteTweetData {
     deleted: bool,
 }
 
+// --- Retweet response types ---
+
+#[derive(Deserialize)]
+struct RetweetResponse {
+    data: RetweetData,
+}
+
+#[derive(Deserialize)]
+struct RetweetData {
+    retweeted: bool,
+}
+
 // --- Search response types ---
 
 #[derive(Deserialize)]
@@ -841,6 +853,70 @@ impl XClient {
             .map_err(|e| format!("Failed to parse delete response: {e}"))?;
 
         Ok(response.data.deleted)
+    }
+
+    // --- Retweets ---
+
+    pub async fn retweet(&self, user_id: &str, tweet_id: &str) -> Result<bool, String> {
+        let url = format!("https://api.x.com/2/users/{user_id}/retweets");
+        let body = serde_json::json!({ "tweet_id": tweet_id });
+
+        let resp = self
+            .retry_503(|| {
+                let auth = self.oauth_header("POST", &url, &BTreeMap::new());
+                self.http
+                    .post(&url)
+                    .header("Authorization", auth)
+                    .json(&body)
+            })
+            .await?;
+
+        self.check_auth_error(&resp);
+        let status = resp.status();
+        if status.as_u16() == 429 {
+            let reset = self.rate_limit_reset(&resp);
+            return Err(format!("Rate limited (429). {reset}Try again later."));
+        }
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!("X API error ({status}): {body}"));
+        }
+
+        let response: RetweetResponse = resp
+            .json()
+            .await
+            .map_err(|e| format!("Failed to parse retweet response: {e}"))?;
+
+        Ok(response.data.retweeted)
+    }
+
+    pub async fn unretweet(&self, user_id: &str, tweet_id: &str) -> Result<bool, String> {
+        let url = format!("https://api.x.com/2/users/{user_id}/retweets/{tweet_id}");
+
+        let resp = self
+            .retry_503(|| {
+                let auth = self.oauth_header("DELETE", &url, &BTreeMap::new());
+                self.http.delete(&url).header("Authorization", auth)
+            })
+            .await?;
+
+        self.check_auth_error(&resp);
+        let status = resp.status();
+        if status.as_u16() == 429 {
+            let reset = self.rate_limit_reset(&resp);
+            return Err(format!("Rate limited (429). {reset}Try again later."));
+        }
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!("X API error ({status}): {body}"));
+        }
+
+        let response: RetweetResponse = resp
+            .json()
+            .await
+            .map_err(|e| format!("Failed to parse unretweet response: {e}"))?;
+
+        Ok(response.data.retweeted)
     }
 
     // --- Search ---
