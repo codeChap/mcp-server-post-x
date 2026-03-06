@@ -1,6 +1,7 @@
 use crate::api::{Config, MeData, MediaAttachment, PostResult, UserProfile, UserSummary, XClient};
 use crate::params::{
-    FollowsLookupParams, LookupUserParams, PostThreadParams, PostTweetParams, UploadMediaParams,
+    FollowsLookupParams, LookupUserParams, PostThreadParams, PostTweetParams, TweetIdParams,
+    UploadMediaParams,
 };
 use rmcp::{
     ErrorData as McpError, ServerHandler, handler::server::tool::ToolRouter,
@@ -118,6 +119,15 @@ impl PostXServer {
         }
 
         output
+    }
+
+    fn extract_tweet_id(input: &str) -> &str {
+        let trimmed = input.trim();
+        if let Some(rest) = trimmed.split("/status/").nth(1) {
+            rest.split(['?', '#', '/']).next().unwrap_or(trimmed)
+        } else {
+            trimmed
+        }
     }
 }
 
@@ -380,6 +390,62 @@ impl PostXServer {
             Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
         }
     }
+
+    #[tool(
+        description = "Like a tweet on X (Twitter). Accepts a tweet ID or tweet URL."
+    )]
+    async fn like_tweet(
+        &self,
+        Parameters(params): Parameters<TweetIdParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let tweet_id = Self::extract_tweet_id(&params.tweet_id);
+        if tweet_id.is_empty() {
+            return Ok(CallToolResult::error(vec![Content::text(
+                "Tweet ID cannot be empty.",
+            )]));
+        }
+
+        let me = match self.ensure_me().await {
+            Ok(me) => me,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+        };
+
+        match self.client.like_tweet(&me.id, tweet_id).await {
+            Ok(liked) => {
+                let text = format!("Tweet {tweet_id} liked: {liked}");
+                Ok(CallToolResult::success(vec![Content::text(text)]))
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
+        }
+    }
+
+    #[tool(
+        description = "Unlike a tweet on X (Twitter). Accepts a tweet ID or tweet URL."
+    )]
+    async fn unlike_tweet(
+        &self,
+        Parameters(params): Parameters<TweetIdParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let tweet_id = Self::extract_tweet_id(&params.tweet_id);
+        if tweet_id.is_empty() {
+            return Ok(CallToolResult::error(vec![Content::text(
+                "Tweet ID cannot be empty.",
+            )]));
+        }
+
+        let me = match self.ensure_me().await {
+            Ok(me) => me,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+        };
+
+        match self.client.unlike_tweet(&me.id, tweet_id).await {
+            Ok(liked) => {
+                let text = format!("Tweet {tweet_id} unliked (liked: {liked})");
+                Ok(CallToolResult::success(vec![Content::text(text)]))
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
+        }
+    }
 }
 
 #[tool_handler]
@@ -396,10 +462,8 @@ impl ServerHandler for PostXServer {
                 website_url: None,
             },
             instructions: Some(
-                "X (Twitter) server. Use post_tweet to post tweets with optional media, \
-                 upload_media to pre-upload media, post_thread to post threads, \
-                 get_me to verify credentials, get_followers/get_following to list follows, \
-                 lookup_user to view any user's profile."
+                "X (Twitter) server. Tools: post_tweet, upload_media, post_thread, \
+                 get_me, get_followers, get_following, lookup_user, like_tweet, unlike_tweet."
                     .to_string(),
             ),
         }

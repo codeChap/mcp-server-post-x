@@ -273,6 +273,18 @@ pub struct UserProfile {
     pub public_metrics: Option<PublicMetrics>,
 }
 
+// --- Like response types ---
+
+#[derive(Deserialize)]
+struct LikeResponse {
+    data: LikeData,
+}
+
+#[derive(Deserialize)]
+struct LikeData {
+    liked: bool,
+}
+
 // --- XClient implementation ---
 
 impl XClient {
@@ -664,6 +676,72 @@ impl XClient {
             .map_err(|e| format!("Failed to parse user lookup response: {e}"))?;
 
         response.data.ok_or_else(|| "User not found".to_string())
+    }
+
+    // --- Likes ---
+
+    pub async fn like_tweet(&self, user_id: &str, tweet_id: &str) -> Result<bool, String> {
+        let url = format!("https://api.x.com/2/users/{user_id}/likes");
+        let body = serde_json::json!({ "tweet_id": tweet_id });
+
+        let resp = self
+            .retry_503(|| {
+                let auth = self.oauth_header("POST", &url, &BTreeMap::new());
+                self.http
+                    .post(&url)
+                    .header("Authorization", auth)
+                    .json(&body)
+            })
+            .await?;
+
+        self.check_auth_error(&resp);
+        let status = resp.status();
+        if status.as_u16() == 429 {
+            let reset = self.rate_limit_reset(&resp);
+            return Err(format!("Rate limited (429). {reset}Try again later."));
+        }
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!("X API error ({status}): {body}"));
+        }
+
+        let response: LikeResponse = resp
+            .json()
+            .await
+            .map_err(|e| format!("Failed to parse like response: {e}"))?;
+
+        Ok(response.data.liked)
+    }
+
+    pub async fn unlike_tweet(&self, user_id: &str, tweet_id: &str) -> Result<bool, String> {
+        let url = format!("https://api.x.com/2/users/{user_id}/likes/{tweet_id}");
+
+        let resp = self
+            .retry_503(|| {
+                let auth = self.oauth_header("DELETE", &url, &BTreeMap::new());
+                self.http
+                    .delete(&url)
+                    .header("Authorization", auth)
+            })
+            .await?;
+
+        self.check_auth_error(&resp);
+        let status = resp.status();
+        if status.as_u16() == 429 {
+            let reset = self.rate_limit_reset(&resp);
+            return Err(format!("Rate limited (429). {reset}Try again later."));
+        }
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!("X API error ({status}): {body}"));
+        }
+
+        let response: LikeResponse = resp
+            .json()
+            .await
+            .map_err(|e| format!("Failed to parse unlike response: {e}"))?;
+
+        Ok(response.data.liked)
     }
 
     // --- Simple upload (images ≤5MB) ---

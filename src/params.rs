@@ -52,6 +52,12 @@ pub struct PostThreadParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct TweetIdParams {
+    #[schemars(description = "The tweet ID or tweet URL (e.g. '123456' or 'https://x.com/user/status/123456')")]
+    pub tweet_id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct LookupUserParams {
     #[schemars(description = "Username (with or without @) or numeric user ID")]
     pub user: String,
