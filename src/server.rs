@@ -1,7 +1,10 @@
-use crate::api::{Config, MeData, MediaAttachment, PostResult, UserProfile, UserSummary, XClient};
+use crate::api::{
+    Config, MeData, MediaAttachment, PostResult, SearchTweetResult, UserProfile, UserSummary,
+    XClient,
+};
 use crate::params::{
-    FollowsLookupParams, LookupUserParams, PostThreadParams, PostTweetParams, TweetIdParams,
-    UploadMediaParams,
+    FollowsLookupParams, LookupUserParams, PostThreadParams, PostTweetParams, SearchTweetsParams,
+    TweetIdParams, UploadMediaParams,
 };
 use rmcp::{
     ErrorData as McpError, ServerHandler, handler::server::tool::ToolRouter,
@@ -128,6 +131,42 @@ impl PostXServer {
         } else {
             trimmed
         }
+    }
+
+    fn format_search_results(
+        query: &str,
+        tweets: &[SearchTweetResult],
+        next_token: &Option<String>,
+    ) -> String {
+        if tweets.is_empty() {
+            return format!("No results found for \"{query}\".");
+        }
+
+        let mut output = format!("Search results for \"{}\" ({} results):\n", query, tweets.len());
+        for (i, t) in tweets.iter().enumerate() {
+            let author = t
+                .username
+                .as_deref()
+                .map(|u| format!("@{u}"))
+                .unwrap_or_else(|| "unknown".to_string());
+            let date = t
+                .created_at
+                .as_deref()
+                .and_then(|d| d.split('T').next())
+                .unwrap_or("");
+            output.push_str(&format!("{}. {} · {}\n", i + 1, author, date));
+            output.push_str(&format!("   {}\n", t.text.replace('\n', "\n   ")));
+            output.push_str(&format!(
+                "   RT:{} Like:{} Reply:{} id:{}\n",
+                t.retweet_count, t.like_count, t.reply_count, t.id
+            ));
+        }
+
+        if let Some(token) = next_token {
+            output.push_str(&format!("\nMore results available. Next page token: {token}"));
+        }
+
+        output
     }
 }
 
@@ -469,6 +508,37 @@ impl PostXServer {
             Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
         }
     }
+
+    #[tool(
+        description = "Search recent tweets on X (Twitter) from the last 7 days. Supports operators: from:user, #hashtag, @mention, \"exact phrase\", -exclude, lang:en, etc."
+    )]
+    async fn search_tweets(
+        &self,
+        Parameters(params): Parameters<SearchTweetsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let query = params.query.trim();
+        if query.is_empty() {
+            return Ok(CallToolResult::error(vec![Content::text(
+                "Search query cannot be empty.",
+            )]));
+        }
+
+        let max_results = params.max_results.unwrap_or(10).clamp(10, 100);
+        let sort_order = params.sort_order.as_deref();
+
+        match self
+            .client
+            .search_recent_tweets(query, max_results, sort_order, params.pagination_token.as_deref())
+            .await
+        {
+            Ok(result) => {
+                let text =
+                    Self::format_search_results(query, &result.tweets, &result.next_token);
+                Ok(CallToolResult::success(vec![Content::text(text)]))
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
+        }
+    }
 }
 
 #[tool_handler]
@@ -486,8 +556,8 @@ impl ServerHandler for PostXServer {
             },
             instructions: Some(
                 "X (Twitter) server. Tools: post_tweet, post_thread, upload_media, \
-                 delete_tweet, get_me, lookup_user, get_followers, get_following, \
-                 like_tweet, unlike_tweet."
+                 delete_tweet, search_tweets, get_me, lookup_user, get_followers, \
+                 get_following, like_tweet, unlike_tweet."
                     .to_string(),
             ),
         }

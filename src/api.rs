@@ -297,6 +297,62 @@ struct DeleteTweetData {
     deleted: bool,
 }
 
+// --- Search response types ---
+
+#[derive(Deserialize)]
+struct SearchResponse {
+    data: Option<Vec<SearchTweet>>,
+    includes: Option<SearchIncludes>,
+    meta: Option<SearchMeta>,
+}
+
+#[derive(Deserialize)]
+struct SearchTweet {
+    id: String,
+    text: String,
+    author_id: Option<String>,
+    created_at: Option<String>,
+    public_metrics: Option<TweetPublicMetrics>,
+}
+
+#[derive(Deserialize)]
+struct TweetPublicMetrics {
+    like_count: u64,
+    retweet_count: u64,
+    reply_count: u64,
+}
+
+#[derive(Deserialize)]
+struct SearchIncludes {
+    users: Option<Vec<SearchUser>>,
+}
+
+#[derive(Deserialize)]
+struct SearchUser {
+    id: String,
+    username: String,
+}
+
+#[derive(Deserialize)]
+struct SearchMeta {
+    next_token: Option<String>,
+}
+
+pub struct SearchResult {
+    pub tweets: Vec<SearchTweetResult>,
+    pub next_token: Option<String>,
+}
+
+pub struct SearchTweetResult {
+    pub id: String,
+    pub text: String,
+    pub username: Option<String>,
+    pub created_at: Option<String>,
+    pub like_count: u64,
+    pub retweet_count: u64,
+    pub reply_count: u64,
+}
+
 // --- XClient implementation ---
 
 impl XClient {
@@ -785,6 +841,104 @@ impl XClient {
             .map_err(|e| format!("Failed to parse delete response: {e}"))?;
 
         Ok(response.data.deleted)
+    }
+
+    // --- Search ---
+
+    pub async fn search_recent_tweets(
+        &self,
+        query: &str,
+        max_results: u32,
+        sort_order: Option<&str>,
+        pagination_token: Option<&str>,
+    ) -> Result<SearchResult, String> {
+        let base_url = "https://api.x.com/2/tweets/search/recent";
+
+        let mut params = BTreeMap::new();
+        params.insert("query".to_string(), query.to_string());
+        params.insert("max_results".to_string(), max_results.to_string());
+        params.insert(
+            "tweet.fields".to_string(),
+            "id,text,author_id,created_at,public_metrics".to_string(),
+        );
+        params.insert("expansions".to_string(), "author_id".to_string());
+        params.insert("user.fields".to_string(), "username".to_string());
+        if let Some(order) = sort_order {
+            params.insert("sort_order".to_string(), order.to_string());
+        }
+        if let Some(token) = pagination_token {
+            params.insert("pagination_token".to_string(), token.to_string());
+        }
+
+        let query_string: String = params
+            .iter()
+            .map(|(k, v)| format!("{}={}", pct_encode(k), pct_encode(v)))
+            .collect::<Vec<_>>()
+            .join("&");
+        let full_url = format!("{base_url}?{query_string}");
+
+        let resp = self
+            .retry_503(|| {
+                let auth = self.oauth_header("GET", base_url, &params);
+                self.http.get(&full_url).header("Authorization", auth)
+            })
+            .await?;
+
+        self.check_auth_error(&resp);
+        let status = resp.status();
+        if status.as_u16() == 429 {
+            let reset = self.rate_limit_reset(&resp);
+            return Err(format!("Rate limited (429). {reset}Try again later."));
+        }
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!("X API error ({status}): {body}"));
+        }
+
+        let response: SearchResponse = resp
+            .json()
+            .await
+            .map_err(|e| format!("Failed to parse search response: {e}"))?;
+
+        // Build author_id -> username lookup from includes
+        let user_map: std::collections::HashMap<String, String> = response
+            .includes
+            .and_then(|inc| inc.users)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|u| (u.id, u.username))
+            .collect();
+
+        let tweets = response
+            .data
+            .unwrap_or_default()
+            .into_iter()
+            .map(|t| {
+                let username = t
+                    .author_id
+                    .as_ref()
+                    .and_then(|aid| user_map.get(aid))
+                    .cloned();
+                let (like_count, retweet_count, reply_count) =
+                    t.public_metrics.map_or((0, 0, 0), |m| {
+                        (m.like_count, m.retweet_count, m.reply_count)
+                    });
+                SearchTweetResult {
+                    id: t.id,
+                    text: t.text,
+                    username,
+                    created_at: t.created_at,
+                    like_count,
+                    retweet_count,
+                    reply_count,
+                }
+            })
+            .collect();
+
+        Ok(SearchResult {
+            tweets,
+            next_token: response.meta.and_then(|m| m.next_token),
+        })
     }
 
     // --- Simple upload (images ≤5MB) ---

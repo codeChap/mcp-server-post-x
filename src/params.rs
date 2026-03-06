@@ -52,6 +52,18 @@ pub struct PostThreadParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct SearchTweetsParams {
+    #[schemars(description = "Search query. Supports Twitter operators like from:user, #hashtag, @mention, \"exact phrase\", -exclude, lang:en, etc.")]
+    pub query: String,
+    #[schemars(description = "Maximum results to return (10-100, default 10)")]
+    pub max_results: Option<u32>,
+    #[schemars(description = "Sort order: 'recency' (newest first) or 'relevancy' (most relevant first)")]
+    pub sort_order: Option<String>,
+    #[schemars(description = "Pagination token from a previous response to get the next page")]
+    pub pagination_token: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct TweetIdParams {
     #[schemars(description = "The tweet ID or tweet URL (e.g. '123456' or 'https://x.com/user/status/123456')")]
     pub tweet_id: String,
