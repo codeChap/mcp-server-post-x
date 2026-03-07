@@ -52,6 +52,32 @@ pub struct PostThreadParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct TimelineParams {
+    #[schemars(description = "Maximum results to return (1-100, default 20)")]
+    pub max_results: Option<u32>,
+    #[schemars(description = "Exclude 'replies', 'retweets', or both comma-separated")]
+    pub exclude: Option<String>,
+    #[schemars(description = "Pagination token from a previous response to get the next page")]
+    pub pagination_token: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct GetDmEventsParams {
+    #[schemars(description = "Maximum results to return (1-100, default 20)")]
+    pub max_results: Option<u32>,
+    #[schemars(description = "Pagination token from a previous response to get the next page")]
+    pub pagination_token: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SendDmParams {
+    #[schemars(description = "The DM conversation ID (e.g. '123456-789012' for 1-on-1 conversations)")]
+    pub conversation_id: String,
+    #[schemars(description = "The message text to send")]
+    pub text: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct SearchTweetsParams {
     #[schemars(description = "Search query. Supports Twitter operators like from:user, #hashtag, @mention, \"exact phrase\", -exclude, lang:en, etc.")]
     pub query: String,

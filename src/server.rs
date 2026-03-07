@@ -1,10 +1,10 @@
 use crate::api::{
-    Config, MeData, MediaAttachment, PostResult, SearchTweetResult, UserProfile, UserSummary,
-    XClient,
+    Config, DmEventResult, MeData, MediaAttachment, PostResult, SearchTweetResult, UserProfile,
+    UserSummary, XClient,
 };
 use crate::params::{
-    FollowsLookupParams, LookupUserParams, PostThreadParams, PostTweetParams, SearchTweetsParams,
-    TweetIdParams, UploadMediaParams,
+    FollowsLookupParams, GetDmEventsParams, LookupUserParams, PostThreadParams, PostTweetParams,
+    SearchTweetsParams, SendDmParams, TimelineParams, TweetIdParams, UploadMediaParams,
 };
 use rmcp::{
     ErrorData as McpError, ServerHandler, handler::server::tool::ToolRouter,
@@ -159,6 +159,43 @@ impl PostXServer {
             output.push_str(&format!(
                 "   RT:{} Like:{} Reply:{} id:{}\n",
                 t.retweet_count, t.like_count, t.reply_count, t.id
+            ));
+        }
+
+        if let Some(token) = next_token {
+            output.push_str(&format!("\nMore results available. Next page token: {token}"));
+        }
+
+        output
+    }
+
+    fn format_dm_events(
+        events: &[DmEventResult],
+        next_token: &Option<String>,
+    ) -> String {
+        if events.is_empty() {
+            return "No DM events found.".to_string();
+        }
+
+        let mut output = format!("DM events ({} messages):\n", events.len());
+        for (i, e) in events.iter().enumerate() {
+            let sender = e
+                .sender_id
+                .as_deref()
+                .unwrap_or("unknown");
+            let date = e
+                .created_at
+                .as_deref()
+                .and_then(|d| d.split('T').next())
+                .unwrap_or("");
+            let conv = e
+                .conversation_id
+                .as_deref()
+                .unwrap_or("?");
+            let text = e.text.as_deref().unwrap_or("");
+            output.push_str(&format!(
+                "{}. [{}] sender:{} conv:{}\n   {}\n",
+                i + 1, date, sender, conv, text
             ));
         }
 
@@ -595,6 +632,93 @@ impl PostXServer {
             Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
         }
     }
+
+    #[tool(
+        description = "Get the authenticated user's home timeline on X (Twitter). Returns recent tweets in reverse chronological order. Can exclude replies and/or retweets."
+    )]
+    async fn get_timeline(
+        &self,
+        Parameters(params): Parameters<TimelineParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let me = match self.ensure_me().await {
+            Ok(me) => me,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+        };
+
+        let max_results = params.max_results.unwrap_or(20).clamp(1, 100);
+
+        match self
+            .client
+            .get_timeline(
+                &me.id,
+                max_results,
+                params.pagination_token.as_deref(),
+                params.exclude.as_deref(),
+            )
+            .await
+        {
+            Ok(result) => {
+                let text =
+                    Self::format_search_results("timeline", &result.tweets, &result.next_token);
+                Ok(CallToolResult::success(vec![Content::text(text)]))
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
+        }
+    }
+
+    #[tool(
+        description = "Get recent direct messages on X (Twitter). Returns DM events across all conversations with sender IDs and conversation IDs."
+    )]
+    async fn get_dm_events(
+        &self,
+        Parameters(params): Parameters<GetDmEventsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let max_results = params.max_results.unwrap_or(20).clamp(1, 100);
+
+        match self
+            .client
+            .get_dm_events(max_results, params.pagination_token.as_deref())
+            .await
+        {
+            Ok(result) => {
+                let text = Self::format_dm_events(&result.events, &result.next_token);
+                Ok(CallToolResult::success(vec![Content::text(text)]))
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
+        }
+    }
+
+    #[tool(
+        description = "Send a direct message on X (Twitter). Requires a conversation ID (get it from get_dm_events) and message text."
+    )]
+    async fn send_dm(
+        &self,
+        Parameters(params): Parameters<SendDmParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let conversation_id = params.conversation_id.trim();
+        if conversation_id.is_empty() {
+            return Ok(CallToolResult::error(vec![Content::text(
+                "Conversation ID cannot be empty.",
+            )]));
+        }
+        let text = params.text.trim();
+        if text.is_empty() {
+            return Ok(CallToolResult::error(vec![Content::text(
+                "Message text cannot be empty.",
+            )]));
+        }
+
+        match self.client.send_dm(conversation_id, text).await {
+            Ok(result) => {
+                let msg = format!(
+                    "DM sent!\nConversation: {}\nEvent ID: {}",
+                    result.conversation_id, result.event_id
+                );
+                Ok(CallToolResult::success(vec![Content::text(msg)]))
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
+        }
+    }
 }
 
 #[tool_handler]
@@ -612,8 +736,9 @@ impl ServerHandler for PostXServer {
             },
             instructions: Some(
                 "X (Twitter) server. Tools: post_tweet, post_thread, upload_media, \
-                 delete_tweet, search_tweets, get_me, lookup_user, get_followers, \
-                 get_following, like_tweet, unlike_tweet, retweet, unretweet."
+                 delete_tweet, search_tweets, get_timeline, get_me, lookup_user, \
+                 get_followers, get_following, like_tweet, unlike_tweet, retweet, \
+                 unretweet, get_dm_events, send_dm."
                     .to_string(),
             ),
         }

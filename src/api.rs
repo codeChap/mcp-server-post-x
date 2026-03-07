@@ -309,6 +309,68 @@ struct RetweetData {
     retweeted: bool,
 }
 
+// --- Timeline response types ---
+
+#[derive(Deserialize)]
+struct TimelineResponse {
+    data: Option<Vec<SearchTweet>>,
+    includes: Option<SearchIncludes>,
+    meta: Option<SearchMeta>,
+}
+
+// --- DM response types ---
+
+#[derive(Deserialize)]
+struct DmEventsResponse {
+    data: Option<Vec<DmEvent>>,
+    meta: Option<DmMeta>,
+}
+
+#[derive(Deserialize)]
+struct DmEvent {
+    id: String,
+    event_type: String,
+    sender_id: Option<String>,
+    text: Option<String>,
+    created_at: Option<String>,
+    dm_conversation_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct DmMeta {
+    next_token: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct SendDmResponse {
+    data: SendDmData,
+}
+
+#[derive(Deserialize)]
+struct SendDmData {
+    dm_conversation_id: String,
+    dm_event_id: String,
+}
+
+pub struct DmEventResult {
+    pub id: String,
+    pub event_type: String,
+    pub sender_id: Option<String>,
+    pub text: Option<String>,
+    pub created_at: Option<String>,
+    pub conversation_id: Option<String>,
+}
+
+pub struct DmEventsResult {
+    pub events: Vec<DmEventResult>,
+    pub next_token: Option<String>,
+}
+
+pub struct SendDmResult {
+    pub conversation_id: String,
+    pub event_id: String,
+}
+
 // --- Search response types ---
 
 #[derive(Deserialize)]
@@ -917,6 +979,216 @@ impl XClient {
             .map_err(|e| format!("Failed to parse unretweet response: {e}"))?;
 
         Ok(response.data.retweeted)
+    }
+
+    // --- Timeline ---
+
+    pub async fn get_timeline(
+        &self,
+        user_id: &str,
+        max_results: u32,
+        pagination_token: Option<&str>,
+        exclude: Option<&str>,
+    ) -> Result<SearchResult, String> {
+        let base_url = format!(
+            "https://api.x.com/2/users/{user_id}/timelines/reverse_chronological"
+        );
+
+        let mut params = BTreeMap::new();
+        params.insert("max_results".to_string(), max_results.to_string());
+        params.insert(
+            "tweet.fields".to_string(),
+            "id,text,author_id,created_at,public_metrics".to_string(),
+        );
+        params.insert("expansions".to_string(), "author_id".to_string());
+        params.insert("user.fields".to_string(), "username".to_string());
+        if let Some(token) = pagination_token {
+            params.insert("pagination_token".to_string(), token.to_string());
+        }
+        if let Some(exc) = exclude {
+            params.insert("exclude".to_string(), exc.to_string());
+        }
+
+        let query_string: String = params
+            .iter()
+            .map(|(k, v)| format!("{}={}", pct_encode(k), pct_encode(v)))
+            .collect::<Vec<_>>()
+            .join("&");
+        let full_url = format!("{base_url}?{query_string}");
+
+        let resp = self
+            .retry_503(|| {
+                let auth = self.oauth_header("GET", &base_url, &params);
+                self.http.get(&full_url).header("Authorization", auth)
+            })
+            .await?;
+
+        self.check_auth_error(&resp);
+        let status = resp.status();
+        if status.as_u16() == 429 {
+            let reset = self.rate_limit_reset(&resp);
+            return Err(format!("Rate limited (429). {reset}Try again later."));
+        }
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!("X API error ({status}): {body}"));
+        }
+
+        let response: TimelineResponse = resp
+            .json()
+            .await
+            .map_err(|e| format!("Failed to parse timeline response: {e}"))?;
+
+        let user_map: std::collections::HashMap<String, String> = response
+            .includes
+            .and_then(|inc| inc.users)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|u| (u.id, u.username))
+            .collect();
+
+        let tweets = response
+            .data
+            .unwrap_or_default()
+            .into_iter()
+            .map(|t| {
+                let username = t
+                    .author_id
+                    .as_ref()
+                    .and_then(|aid| user_map.get(aid))
+                    .cloned();
+                let (like_count, retweet_count, reply_count) =
+                    t.public_metrics.map_or((0, 0, 0), |m| {
+                        (m.like_count, m.retweet_count, m.reply_count)
+                    });
+                SearchTweetResult {
+                    id: t.id,
+                    text: t.text,
+                    username,
+                    created_at: t.created_at,
+                    like_count,
+                    retweet_count,
+                    reply_count,
+                }
+            })
+            .collect();
+
+        Ok(SearchResult {
+            tweets,
+            next_token: response.meta.and_then(|m| m.next_token),
+        })
+    }
+
+    // --- Direct Messages ---
+
+    pub async fn get_dm_events(
+        &self,
+        max_results: u32,
+        pagination_token: Option<&str>,
+    ) -> Result<DmEventsResult, String> {
+        let base_url = "https://api.x.com/2/dm_events";
+
+        let mut params = BTreeMap::new();
+        params.insert("max_results".to_string(), max_results.to_string());
+        params.insert("event_types".to_string(), "MessageCreate".to_string());
+        params.insert(
+            "dm_event.fields".to_string(),
+            "id,event_type,sender_id,text,created_at,dm_conversation_id".to_string(),
+        );
+        if let Some(token) = pagination_token {
+            params.insert("pagination_token".to_string(), token.to_string());
+        }
+
+        let query_string: String = params
+            .iter()
+            .map(|(k, v)| format!("{}={}", pct_encode(k), pct_encode(v)))
+            .collect::<Vec<_>>()
+            .join("&");
+        let full_url = format!("{base_url}?{query_string}");
+
+        let resp = self
+            .retry_503(|| {
+                let auth = self.oauth_header("GET", base_url, &params);
+                self.http.get(&full_url).header("Authorization", auth)
+            })
+            .await?;
+
+        self.check_auth_error(&resp);
+        let status = resp.status();
+        if status.as_u16() == 429 {
+            let reset = self.rate_limit_reset(&resp);
+            return Err(format!("Rate limited (429). {reset}Try again later."));
+        }
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!("X API error ({status}): {body}"));
+        }
+
+        let response: DmEventsResponse = resp
+            .json()
+            .await
+            .map_err(|e| format!("Failed to parse DM events response: {e}"))?;
+
+        let events = response
+            .data
+            .unwrap_or_default()
+            .into_iter()
+            .map(|e| DmEventResult {
+                id: e.id,
+                event_type: e.event_type,
+                sender_id: e.sender_id,
+                text: e.text,
+                created_at: e.created_at,
+                conversation_id: e.dm_conversation_id,
+            })
+            .collect();
+
+        Ok(DmEventsResult {
+            events,
+            next_token: response.meta.and_then(|m| m.next_token),
+        })
+    }
+
+    pub async fn send_dm(
+        &self,
+        conversation_id: &str,
+        text: &str,
+    ) -> Result<SendDmResult, String> {
+        let url = format!(
+            "https://api.x.com/2/dm_conversations/{conversation_id}/messages"
+        );
+        let body = serde_json::json!({ "text": text });
+
+        let resp = self
+            .retry_503(|| {
+                let auth = self.oauth_header("POST", &url, &BTreeMap::new());
+                self.http
+                    .post(&url)
+                    .header("Authorization", auth)
+                    .json(&body)
+            })
+            .await?;
+
+        self.check_auth_error(&resp);
+        let status = resp.status();
+        if status.as_u16() == 429 {
+            let reset = self.rate_limit_reset(&resp);
+            return Err(format!("Rate limited (429). {reset}Try again later."));
+        }
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!("X API error ({status}): {body}"));
+        }
+
+        let response: SendDmResponse = resp
+            .json()
+            .await
+            .map_err(|e| format!("Failed to parse send DM response: {e}"))?;
+
+        Ok(SendDmResult {
+            conversation_id: response.data.dm_conversation_id,
+            event_id: response.data.dm_event_id,
+        })
     }
 
     // --- Search ---
