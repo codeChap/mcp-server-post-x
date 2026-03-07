@@ -1,67 +1,46 @@
 # mcp-server-post-x
 
-An MCP (Model Context Protocol) server for posting to X (Twitter). Built in Rust using OAuth 1.0a authentication and the X API v2.
+An MCP (Model Context Protocol) server for X (Twitter). Built in Rust using OAuth 1.0a and the X API v2.
 
-Communicates via stdio using JSON-RPC 2.0, like all MCP servers.
-
-**API target date:** February 2026. The X API has been volatile — endpoints may change and require software updates.
+Communicates via stdio using JSON-RPC 2.0.
 
 ## Tools
 
 | Tool | Description |
 |------|-------------|
-| `post_tweet` | Post a single tweet, optionally with an image |
-| `post_thread` | Post a thread of up to 25 tweets, each with an optional image |
-| `get_me` | Get the authenticated user's profile (id, name, username) |
+| `post_tweet` | Post a tweet with optional media (up to 4 images, 1 video, or 1 GIF) |
+| `post_thread` | Post a thread of up to 25 tweets, each with optional media |
+| `delete_tweet` | Delete a tweet by ID or URL |
+| `upload_media` | Upload media for later attachment (returns a media_id) |
+| `search_tweets` | Search recent tweets (last 7 days) with Twitter operators |
+| `get_timeline` | Get your home timeline in reverse chronological order |
+| `get_me` | Get the authenticated user's profile |
+| `lookup_user` | Look up any user by @username or numeric ID |
+| `get_followers` | List your followers |
+| `get_following` | List who you follow |
+| `like_tweet` | Like a tweet by ID or URL |
+| `unlike_tweet` | Unlike a tweet by ID or URL |
+| `retweet` | Retweet a tweet by ID or URL |
+| `unretweet` | Undo a retweet by ID or URL |
+| `get_dm_events` | Get recent direct messages across all conversations |
+| `send_dm` | Send a direct message to a conversation |
 
-### post_tweet
+## Quick Start
 
-Post a single tweet to X, optionally with an image attachment.
+### 1. Build
 
-**Parameters:**
+```bash
+cargo build --release
+```
 
-| Name | Type | Required | Description |
-|------|------|----------|-------------|
-| `text` | string | yes | Tweet text (max 280 characters) |
-| `image` | string | no | Local file path to an image (jpeg, png, gif, webp; max 5MB) |
+Produces `target/release/post-x` (optimized with LTO, stripped).
 
-**Returns:** Tweet ID and URL on success.
+### 2. Configure credentials
 
-### post_thread
-
-Post a thread of tweets. Each tweet is posted as a reply to the previous one.
-
-**Parameters:**
-
-| Name | Type | Required | Description |
-|------|------|----------|-------------|
-| `tweets` | array | yes | Array of tweet objects (max 25) |
-| `tweets[].text` | string | yes | Tweet text (max 280 characters) |
-| `tweets[].image` | string | no | Local file path to an image |
-
-**Returns:** List of tweet IDs and URLs for each posted tweet. If a tweet fails mid-thread, the response includes which tweets succeeded and the error for the one that failed.
-
-### get_me
-
-Get the authenticated user's profile. Useful for verifying that credentials are working.
-
-**Parameters:** None.
-
-**Returns:** User ID, display name, and @username.
-
-## Prerequisites
-
-1. An X developer account at [developer.x.com](https://developer.x.com/)
-2. A project/app with OAuth 1.0a credentials (the free tier works)
-3. All four tokens generated: API Key, API Key Secret, Access Token, Access Token Secret
-
-## Setup
-
-Create the config directory and file:
+Create the config file:
 
 ```bash
 mkdir -p ~/.config/mcp-server-post-x
-chmod 700 ~/.config/mcp-server-post-x
 ```
 
 Create `~/.config/mcp-server-post-x/config.toml`:
@@ -73,33 +52,18 @@ access_token = "your-access-token"
 access_token_secret = "your-access-token-secret"
 ```
 
-Secure the file (it contains secrets):
+Secure it:
 
 ```bash
+chmod 700 ~/.config/mcp-server-post-x
 chmod 600 ~/.config/mcp-server-post-x/config.toml
 ```
 
-The server validates the config at startup and will fail fast with an actionable error if any field is missing or empty.
+See [Getting credentials](#getting-credentials) below for how to obtain these.
 
-## Build
+### 3. Add to your MCP client
 
-```bash
-cargo build --release
-```
-
-This produces `target/release/post-x` (optimized with LTO and stripped).
-
-For development:
-
-```bash
-cargo build              # debug build
-cargo run                # run in dev mode
-RUST_LOG=debug cargo run # run with debug logging (credentials are redacted in logs)
-```
-
-## Claude Code MCP Configuration
-
-Add to your Claude Code MCP settings (`~/.claude/claude_desktop_config.json` or similar):
+Claude Code (`~/.claude.json`):
 
 ```json
 {
@@ -111,34 +75,137 @@ Add to your Claude Code MCP settings (`~/.claude/claude_desktop_config.json` or 
 }
 ```
 
-Then you can ask Claude to post tweets, e.g.:
+Then ask Claude things like:
 
 - "Post a tweet saying hello world"
-- "Post a thread with three points about Rust"
-- "Post this screenshot to X" (with an image path)
+- "Search for tweets about Rust"
+- "Show me my timeline"
+- "Like this tweet: https://x.com/someone/status/123456"
+- "Who are my followers?"
+- "Look up @elonmusk"
 
-## Rate Limits (Free Tier)
+## Tool Reference
 
-- ~17 tweets per 24 hours for posting
-- Media uploads have separate rate limits
-- The server surfaces rate limit reset times in error messages — it does not auto-retry (the caller decides when to retry)
+### post_tweet
+
+| Param | Type | Required | Description |
+|-------|------|----------|-------------|
+| `text` | string | yes | Tweet text (max 280 characters) |
+| `media` | array | no | Media to upload and attach. Each item: `{ path, alt_text? }`. Max 4 images, or 1 video, or 1 GIF. |
+| `media_ids` | array | no | Pre-uploaded media IDs to attach (max 4). Mutually exclusive with `media`. |
+
+### post_thread
+
+| Param | Type | Required | Description |
+|-------|------|----------|-------------|
+| `tweets` | array | yes | Array of tweets (max 25). Each: `{ text, media? }` |
+
+### delete_tweet / like_tweet / unlike_tweet / retweet / unretweet
+
+| Param | Type | Required | Description |
+|-------|------|----------|-------------|
+| `tweet_id` | string | yes | Tweet ID or full tweet URL |
+
+All accept URLs like `https://x.com/user/status/123456` — the ID is extracted automatically.
+
+### upload_media
+
+| Param | Type | Required | Description |
+|-------|------|----------|-------------|
+| `path` | string | yes | Local file path. Supported: jpeg/png/webp (max 5MB), gif (max 15MB), mp4 (max 512MB) |
+| `alt_text` | string | no | Alt text (images and GIFs only, not video) |
+
+Returns a `media_id` to use with `post_tweet`'s `media_ids` param.
+
+### search_tweets
+
+| Param | Type | Required | Description |
+|-------|------|----------|-------------|
+| `query` | string | yes | Search query. Supports: `from:user`, `#hashtag`, `@mention`, `"exact phrase"`, `-exclude`, `lang:en` |
+| `max_results` | integer | no | 10-100 (default 10) |
+| `sort_order` | string | no | `recency` or `relevancy` |
+| `pagination_token` | string | no | Next page token from previous response |
+
+### get_timeline
+
+| Param | Type | Required | Description |
+|-------|------|----------|-------------|
+| `max_results` | integer | no | 1-100 (default 20) |
+| `exclude` | string | no | `replies`, `retweets`, or both comma-separated |
+| `pagination_token` | string | no | Next page token |
+
+### lookup_user
+
+| Param | Type | Required | Description |
+|-------|------|----------|-------------|
+| `user` | string | yes | Username (with or without `@`) or numeric user ID |
+
+### get_followers / get_following
+
+| Param | Type | Required | Description |
+|-------|------|----------|-------------|
+| `max_results` | integer | no | 1-100 (default 20) |
+| `pagination_token` | string | no | Next page token |
+
+### get_dm_events
+
+| Param | Type | Required | Description |
+|-------|------|----------|-------------|
+| `max_results` | integer | no | 1-100 (default 20) |
+| `pagination_token` | string | no | Next page token |
+
+### send_dm
+
+| Param | Type | Required | Description |
+|-------|------|----------|-------------|
+| `conversation_id` | string | yes | DM conversation ID (get from `get_dm_events`) |
+| `text` | string | yes | Message text |
+
+### get_me
+
+No parameters. Returns your user ID, display name, and @username.
+
+## Getting Credentials
+
+1. Go to [developer.x.com](https://developer.x.com/) and sign up for a developer account
+2. Create a Project and an App in the Developer Console
+3. In your App settings, set up **User authentication**:
+   - App permissions: **Read and write** (and **Direct Messages** if you want DM support)
+   - Type: **Web App, Automated App or Bot**
+   - Callback URL: `https://example.com` (not used, but required)
+   - Website URL: any valid URL
+4. Go to **Keys and tokens** and generate:
+   - **API Key** and **API Key Secret** (under Consumer Keys)
+   - **Access Token** and **Access Token Secret** (under Authentication Tokens)
+5. Copy all four values into your `config.toml`
+
+The server validates credentials at startup. If you get persistent 401 errors, regenerate your tokens at [developer.x.com](https://developer.x.com/).
+
+## Development
+
+```bash
+cargo build              # debug build
+cargo run                # run in dev mode
+RUST_LOG=debug cargo run # debug logging (credentials are redacted)
+```
 
 ## Technical Details
 
-- **Authentication:** OAuth 1.0a with HMAC-SHA1 signatures and RFC 3986 percent-encoding
-- **Tweet API:** X API v2 (`POST https://api.x.com/2/tweets`)
-- **Media upload:** Legacy v1.1 API (`POST https://upload.twitter.com/1.1/media/upload.json`) — no v2 equivalent exists yet
-- **Image validation:** File must exist, be ≤5MB, and have a jpeg/png/gif/webp extension
-- **Thread posting:** 500ms delay between tweets to avoid rate limits, chained via `in_reply_to_tweet_id`
-- **Credential errors:** Persistent 401 errors are logged with guidance to regenerate credentials at [developer.x.com](https://developer.x.com/)
-- **Logging:** Uses `tracing` with `RUST_LOG` env filter; all credentials are redacted in debug output
+- **Auth:** OAuth 1.0a with HMAC-SHA1 signatures (RFC 5849, RFC 3986 percent-encoding)
+- **Tweet API:** X API v2 (`api.x.com/2/`)
+- **Media upload:** v1.1 chunked upload (`upload.twitter.com/1.1/media/upload.json`) — INIT/APPEND/FINALIZE/STATUS flow for video/GIF, simple multipart for images
+- **Media limits:** JPEG/PNG/WebP up to 5MB, GIF up to 15MB, MP4 up to 512MB
+- **Media validation:** Max 4 images OR 1 video OR 1 GIF per tweet (no mixing)
+- **Thread posting:** 500ms delay between tweets, chained via `in_reply_to_tweet_id`
+- **Retry logic:** Automatic retry with exponential backoff on 503 errors
+- **Rate limits:** 429 responses include reset timestamp in error message (no auto-retry — the caller decides)
 
 ## Project Structure
 
 ```
 src/
-  main.rs    — entry point, config loading and validation, tracing setup, stdio serve
-  server.rs  — MCP tool definitions (post_tweet, post_thread, get_me) with username caching
-  api.rs     — X API client: OAuth 1.0a signing, tweet posting, media upload, error handling
-  params.rs  — tool parameter types with serde and JSON Schema derives
+  main.rs    — entry point, config loading, tracing, stdio transport
+  server.rs  — MCP tool handlers, response formatting, cached auth state
+  api.rs     — X API client: OAuth signing, tweet/media/user/DM endpoints
+  params.rs  — tool parameter types (serde + JSON Schema)
 ```
