@@ -1,3 +1,12 @@
+macro_rules! try_tool {
+    ($expr:expr) => {
+        match $expr {
+            Ok(v) => v,
+            Err(e) => return Ok(e),
+        }
+    };
+}
+
 use crate::api::{
     Config, DmEventResult, MeData, MediaAttachment, PostResult, SearchTweetResult, UserProfile,
     UserSummary, XClient,
@@ -37,8 +46,41 @@ impl PostXServer {
         Ok(me)
     }
 
+    fn require_me(result: Result<MeData, String>) -> Result<MeData, CallToolResult> {
+        result.map_err(|e| CallToolResult::error(vec![Content::text(e)]))
+    }
+
+    fn require_tweet_id(raw: &str) -> Result<&str, CallToolResult> {
+        let id = Self::extract_tweet_id(raw);
+        if id.is_empty() {
+            Err(CallToolResult::error(vec![Content::text(
+                "Tweet ID cannot be empty.",
+            )]))
+        } else {
+            Ok(id)
+        }
+    }
+
+    fn ok_or_err(result: Result<String, String>) -> CallToolResult {
+        match result {
+            Ok(text) => CallToolResult::success(vec![Content::text(text)]),
+            Err(e) => CallToolResult::error(vec![Content::text(e)]),
+        }
+    }
+
     fn format_post_result(result: &PostResult) -> String {
         format!("Tweet posted!\nID: {}\nURL: {}", result.tweet_id, result.url)
+    }
+
+    fn truncate_str(s: &str, max_bytes: usize) -> &str {
+        if s.len() <= max_bytes {
+            return s;
+        }
+        let mut end = max_bytes;
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        &s[..end]
     }
 
     fn format_follows(users: &[UserSummary], next_token: &Option<String>, label: &str) -> String {
@@ -63,7 +105,7 @@ impl PostXServer {
             if let Some(ref desc) = user.description {
                 if !desc.is_empty() {
                     let truncated = if desc.len() > 100 {
-                        format!("{}...", &desc[..97])
+                        format!("{}...", Self::truncate_str(desc, 97))
                     } else {
                         desc.clone()
                     };
@@ -72,8 +114,39 @@ impl PostXServer {
             }
         }
 
-        if let Some(token) = next_token {
-            output.push_str(&format!("\nMore results available. Next page token: {token}"));
+        Self::append_pagination(&mut output, next_token);
+        output
+    }
+
+    fn format_all_follows(users: &[UserSummary], label: &str) -> String {
+        if users.is_empty() {
+            return format!("No {label} found.");
+        }
+
+        let mut output = format!("Total {}: {}\n", label, users.len());
+        for (i, user) in users.iter().enumerate() {
+            let followers_str = user
+                .public_metrics
+                .as_ref()
+                .map(|m| format!(" - {} followers", m.followers_count))
+                .unwrap_or_default();
+            output.push_str(&format!(
+                "  {}. @{} ({}){}\n",
+                i + 1,
+                user.username,
+                user.name,
+                followers_str,
+            ));
+            if let Some(ref desc) = user.description {
+                if !desc.is_empty() {
+                    let truncated = if desc.len() > 100 {
+                        format!("{}...", Self::truncate_str(desc, 97))
+                    } else {
+                        desc.clone()
+                    };
+                    output.push_str(&format!("     {truncated}\n"));
+                }
+            }
         }
 
         output
@@ -113,7 +186,6 @@ impl PostXServer {
             output.push_str("  Protected: yes\n");
         }
         if let Some(created) = &p.created_at {
-            // Truncate to date only (2013-12-14T04:35:55Z -> 2013-12-14)
             let date = created.split('T').next().unwrap_or(created);
             output.push_str(&format!("  Joined: {date}\n"));
         }
@@ -162,48 +234,43 @@ impl PostXServer {
             ));
         }
 
-        if let Some(token) = next_token {
-            output.push_str(&format!("\nMore results available. Next page token: {token}"));
-        }
-
+        Self::append_pagination(&mut output, next_token);
         output
     }
 
-    fn format_dm_events(
-        events: &[DmEventResult],
-        next_token: &Option<String>,
-    ) -> String {
+    fn format_dm_events(events: &[DmEventResult], next_token: &Option<String>) -> String {
         if events.is_empty() {
             return "No DM events found.".to_string();
         }
 
         let mut output = format!("DM events ({} messages):\n", events.len());
         for (i, e) in events.iter().enumerate() {
-            let sender = e
-                .sender_id
-                .as_deref()
-                .unwrap_or("unknown");
+            let sender = e.sender_id.as_deref().unwrap_or("unknown");
             let date = e
                 .created_at
                 .as_deref()
                 .and_then(|d| d.split('T').next())
                 .unwrap_or("");
-            let conv = e
-                .conversation_id
-                .as_deref()
-                .unwrap_or("?");
+            let conv = e.conversation_id.as_deref().unwrap_or("?");
             let text = e.text.as_deref().unwrap_or("");
             output.push_str(&format!(
                 "{}. [{}] sender:{} conv:{}\n   {}\n",
-                i + 1, date, sender, conv, text
+                i + 1,
+                date,
+                sender,
+                conv,
+                text
             ));
         }
 
+        Self::append_pagination(&mut output, next_token);
+        output
+    }
+
+    fn append_pagination(output: &mut String, next_token: &Option<String>) {
         if let Some(token) = next_token {
             output.push_str(&format!("\nMore results available. Next page token: {token}"));
         }
-
-        output
     }
 }
 
@@ -224,7 +291,6 @@ impl PostXServer {
         &self,
         Parameters(params): Parameters<PostTweetParams>,
     ) -> Result<CallToolResult, McpError> {
-        // Validate mutual exclusivity
         let has_media = params.media.as_ref().is_some_and(|m| !m.is_empty());
         let has_media_ids = params.media_ids.as_ref().is_some_and(|ids| !ids.is_empty());
         if has_media && has_media_ids {
@@ -233,39 +299,27 @@ impl PostXServer {
             )]));
         }
 
-        let me = match self.ensure_me().await {
-            Ok(me) => me,
-            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
-        };
+        let me = try_tool!(Self::require_me(self.ensure_me().await));
 
         let media_attachments: Vec<MediaAttachment> = params
             .media
             .unwrap_or_default()
             .into_iter()
-            .map(|m| MediaAttachment {
-                path: m.path,
-                alt_text: m.alt_text,
-            })
+            .map(Into::into)
             .collect();
 
-        let media_ids = params.media_ids;
-
-        match self
+        let result = self
             .client
             .post_tweet(
                 &params.text,
                 &media_attachments,
-                media_ids.as_deref(),
+                params.media_ids.as_deref(),
                 None,
                 &me.username,
             )
-            .await
-        {
-            Ok(result) => Ok(CallToolResult::success(vec![Content::text(
-                Self::format_post_result(&result),
-            )])),
-            Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
-        }
+            .await;
+
+        Ok(Self::ok_or_err(result.map(|r| Self::format_post_result(&r))))
     }
 
     #[tool(
@@ -288,10 +342,7 @@ impl PostXServer {
             ));
         }
 
-        let me = match self.ensure_me().await {
-            Ok(me) => me,
-            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
-        };
+        let me = try_tool!(Self::require_me(self.ensure_me().await));
 
         let tweets: Vec<(String, Vec<MediaAttachment>)> = params
             .tweets
@@ -301,10 +352,7 @@ impl PostXServer {
                     .media
                     .unwrap_or_default()
                     .into_iter()
-                    .map(|m| MediaAttachment {
-                        path: m.path,
-                        alt_text: m.alt_text,
-                    })
+                    .map(Into::into)
                     .collect();
                 (t.text, media)
             })
@@ -345,20 +393,17 @@ impl PostXServer {
         &self,
         Parameters(params): Parameters<UploadMediaParams>,
     ) -> Result<CallToolResult, McpError> {
-        match self
+        let result = self
             .client
             .upload_media(&params.path, params.alt_text.as_deref())
-            .await
-        {
-            Ok(result) => {
-                let text = format!(
-                    "Media uploaded!\nMedia ID: {}\nType: {}\nState: {}",
-                    result.media_id, result.media_type, result.state
-                );
-                Ok(CallToolResult::success(vec![Content::text(text)]))
-            }
-            Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
-        }
+            .await;
+
+        Ok(Self::ok_or_err(result.map(|r| {
+            format!(
+                "Media uploaded!\nMedia ID: {}\nType: {}\nState: {}",
+                r.media_id, r.media_type, r.state
+            )
+        })))
     }
 
     #[tool(
@@ -388,24 +433,18 @@ impl PostXServer {
         &self,
         Parameters(params): Parameters<FollowsLookupParams>,
     ) -> Result<CallToolResult, McpError> {
-        let me = match self.ensure_me().await {
-            Ok(me) => me,
-            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
-        };
+        let me = try_tool!(Self::require_me(self.ensure_me().await));
 
         let max_results = params.max_results.unwrap_or(20).clamp(1, 100);
 
-        match self
+        let result = self
             .client
             .get_followers(&me.id, max_results, params.pagination_token.as_deref())
-            .await
-        {
-            Ok(result) => {
-                let text = Self::format_follows(&result.users, &result.next_token, "followers");
-                Ok(CallToolResult::success(vec![Content::text(text)]))
-            }
-            Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
-        }
+            .await;
+
+        Ok(Self::ok_or_err(
+            result.map(|r| Self::format_follows(&r.users, &r.next_token, "followers")),
+        ))
     }
 
     #[tool(
@@ -415,24 +454,44 @@ impl PostXServer {
         &self,
         Parameters(params): Parameters<FollowsLookupParams>,
     ) -> Result<CallToolResult, McpError> {
-        let me = match self.ensure_me().await {
-            Ok(me) => me,
-            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
-        };
+        let me = try_tool!(Self::require_me(self.ensure_me().await));
 
         let max_results = params.max_results.unwrap_or(20).clamp(1, 100);
 
-        match self
+        let result = self
             .client
             .get_following(&me.id, max_results, params.pagination_token.as_deref())
-            .await
-        {
-            Ok(result) => {
-                let text = Self::format_follows(&result.users, &result.next_token, "following");
-                Ok(CallToolResult::success(vec![Content::text(text)]))
-            }
-            Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
-        }
+            .await;
+
+        Ok(Self::ok_or_err(
+            result.map(|r| Self::format_follows(&r.users, &r.next_token, "following")),
+        ))
+    }
+
+    #[tool(
+        description = "Get ALL accounts the authenticated user follows on X (Twitter). Auto-paginates to fetch every account. Returns usernames, display names, follower counts, and bios."
+    )]
+    async fn get_all_following(&self) -> Result<CallToolResult, McpError> {
+        let me = try_tool!(Self::require_me(self.ensure_me().await));
+
+        let result = self.client.get_all_following(&me.id).await;
+
+        Ok(Self::ok_or_err(
+            result.map(|users| Self::format_all_follows(&users, "following")),
+        ))
+    }
+
+    #[tool(
+        description = "Get ALL followers of the authenticated user on X (Twitter). Auto-paginates to fetch every follower. Returns usernames, display names, follower counts, and bios."
+    )]
+    async fn get_all_followers(&self) -> Result<CallToolResult, McpError> {
+        let me = try_tool!(Self::require_me(self.ensure_me().await));
+
+        let result = self.client.get_all_followers(&me.id).await;
+
+        Ok(Self::ok_or_err(
+            result.map(|users| Self::format_all_follows(&users, "followers")),
+        ))
     }
 
     #[tool(
@@ -442,7 +501,11 @@ impl PostXServer {
         &self,
         Parameters(params): Parameters<LookupUserParams>,
     ) -> Result<CallToolResult, McpError> {
-        let user = params.user.trim().strip_prefix('@').unwrap_or(params.user.trim());
+        let user = params
+            .user
+            .trim()
+            .strip_prefix('@')
+            .unwrap_or(params.user.trim());
 
         if user.is_empty() {
             return Ok(CallToolResult::error(vec![Content::text(
@@ -458,69 +521,41 @@ impl PostXServer {
             self.client.lookup_user_by_username(user).await
         };
 
-        match result {
-            Ok(profile) => {
-                let text = Self::format_user_profile(&profile);
-                Ok(CallToolResult::success(vec![Content::text(text)]))
-            }
-            Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
-        }
+        Ok(Self::ok_or_err(result.map(|p| Self::format_user_profile(&p))))
     }
 
-    #[tool(
-        description = "Like a tweet on X (Twitter). Accepts a tweet ID or tweet URL."
-    )]
+    #[tool(description = "Like a tweet on X (Twitter). Accepts a tweet ID or tweet URL.")]
     async fn like_tweet(
         &self,
         Parameters(params): Parameters<TweetIdParams>,
     ) -> Result<CallToolResult, McpError> {
-        let tweet_id = Self::extract_tweet_id(&params.tweet_id);
-        if tweet_id.is_empty() {
-            return Ok(CallToolResult::error(vec![Content::text(
-                "Tweet ID cannot be empty.",
-            )]));
-        }
+        let tweet_id = try_tool!(Self::require_tweet_id(&params.tweet_id));
 
-        let me = match self.ensure_me().await {
-            Ok(me) => me,
-            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
-        };
+        let me = try_tool!(Self::require_me(self.ensure_me().await));
 
-        match self.client.like_tweet(&me.id, tweet_id).await {
-            Ok(liked) => {
-                let text = format!("Tweet {tweet_id} liked: {liked}");
-                Ok(CallToolResult::success(vec![Content::text(text)]))
-            }
-            Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
-        }
+        Ok(Self::ok_or_err(
+            self.client
+                .like_tweet(&me.id, tweet_id)
+                .await
+                .map(|liked| format!("Tweet {tweet_id} liked: {liked}")),
+        ))
     }
 
-    #[tool(
-        description = "Unlike a tweet on X (Twitter). Accepts a tweet ID or tweet URL."
-    )]
+    #[tool(description = "Unlike a tweet on X (Twitter). Accepts a tweet ID or tweet URL.")]
     async fn unlike_tweet(
         &self,
         Parameters(params): Parameters<TweetIdParams>,
     ) -> Result<CallToolResult, McpError> {
-        let tweet_id = Self::extract_tweet_id(&params.tweet_id);
-        if tweet_id.is_empty() {
-            return Ok(CallToolResult::error(vec![Content::text(
-                "Tweet ID cannot be empty.",
-            )]));
-        }
+        let tweet_id = try_tool!(Self::require_tweet_id(&params.tweet_id));
 
-        let me = match self.ensure_me().await {
-            Ok(me) => me,
-            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
-        };
+        let me = try_tool!(Self::require_me(self.ensure_me().await));
 
-        match self.client.unlike_tweet(&me.id, tweet_id).await {
-            Ok(liked) => {
-                let text = format!("Tweet {tweet_id} unliked (liked: {liked})");
-                Ok(CallToolResult::success(vec![Content::text(text)]))
-            }
-            Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
-        }
+        Ok(Self::ok_or_err(
+            self.client
+                .unlike_tweet(&me.id, tweet_id)
+                .await
+                .map(|liked| format!("Tweet {tweet_id} unliked (liked: {liked})")),
+        ))
     }
 
     #[tool(
@@ -530,76 +565,48 @@ impl PostXServer {
         &self,
         Parameters(params): Parameters<TweetIdParams>,
     ) -> Result<CallToolResult, McpError> {
-        let tweet_id = Self::extract_tweet_id(&params.tweet_id);
-        if tweet_id.is_empty() {
-            return Ok(CallToolResult::error(vec![Content::text(
-                "Tweet ID cannot be empty.",
-            )]));
-        }
+        let tweet_id = try_tool!(Self::require_tweet_id(&params.tweet_id));
 
-        match self.client.delete_tweet(tweet_id).await {
-            Ok(deleted) => {
-                let text = format!("Tweet {tweet_id} deleted: {deleted}");
-                Ok(CallToolResult::success(vec![Content::text(text)]))
-            }
-            Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
-        }
+        Ok(Self::ok_or_err(
+            self.client
+                .delete_tweet(tweet_id)
+                .await
+                .map(|deleted| format!("Tweet {tweet_id} deleted: {deleted}")),
+        ))
     }
 
-    #[tool(
-        description = "Retweet a tweet on X (Twitter). Accepts a tweet ID or tweet URL."
-    )]
+    #[tool(description = "Retweet a tweet on X (Twitter). Accepts a tweet ID or tweet URL.")]
     async fn retweet(
         &self,
         Parameters(params): Parameters<TweetIdParams>,
     ) -> Result<CallToolResult, McpError> {
-        let tweet_id = Self::extract_tweet_id(&params.tweet_id);
-        if tweet_id.is_empty() {
-            return Ok(CallToolResult::error(vec![Content::text(
-                "Tweet ID cannot be empty.",
-            )]));
-        }
+        let tweet_id = try_tool!(Self::require_tweet_id(&params.tweet_id));
 
-        let me = match self.ensure_me().await {
-            Ok(me) => me,
-            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
-        };
+        let me = try_tool!(Self::require_me(self.ensure_me().await));
 
-        match self.client.retweet(&me.id, tweet_id).await {
-            Ok(retweeted) => {
-                let text = format!("Tweet {tweet_id} retweeted: {retweeted}");
-                Ok(CallToolResult::success(vec![Content::text(text)]))
-            }
-            Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
-        }
+        Ok(Self::ok_or_err(
+            self.client
+                .retweet(&me.id, tweet_id)
+                .await
+                .map(|retweeted| format!("Tweet {tweet_id} retweeted: {retweeted}")),
+        ))
     }
 
-    #[tool(
-        description = "Undo a retweet on X (Twitter). Accepts a tweet ID or tweet URL."
-    )]
+    #[tool(description = "Undo a retweet on X (Twitter). Accepts a tweet ID or tweet URL.")]
     async fn unretweet(
         &self,
         Parameters(params): Parameters<TweetIdParams>,
     ) -> Result<CallToolResult, McpError> {
-        let tweet_id = Self::extract_tweet_id(&params.tweet_id);
-        if tweet_id.is_empty() {
-            return Ok(CallToolResult::error(vec![Content::text(
-                "Tweet ID cannot be empty.",
-            )]));
-        }
+        let tweet_id = try_tool!(Self::require_tweet_id(&params.tweet_id));
 
-        let me = match self.ensure_me().await {
-            Ok(me) => me,
-            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
-        };
+        let me = try_tool!(Self::require_me(self.ensure_me().await));
 
-        match self.client.unretweet(&me.id, tweet_id).await {
-            Ok(retweeted) => {
-                let text = format!("Tweet {tweet_id} unretweeted (retweeted: {retweeted})");
-                Ok(CallToolResult::success(vec![Content::text(text)]))
-            }
-            Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
-        }
+        Ok(Self::ok_or_err(
+            self.client
+                .unretweet(&me.id, tweet_id)
+                .await
+                .map(|retweeted| format!("Tweet {tweet_id} unretweeted (retweeted: {retweeted})")),
+        ))
     }
 
     #[tool(
@@ -617,20 +624,20 @@ impl PostXServer {
         }
 
         let max_results = params.max_results.unwrap_or(10).clamp(10, 100);
-        let sort_order = params.sort_order.as_deref();
 
-        match self
+        let result = self
             .client
-            .search_recent_tweets(query, max_results, sort_order, params.pagination_token.as_deref())
-            .await
-        {
-            Ok(result) => {
-                let text =
-                    Self::format_search_results(query, &result.tweets, &result.next_token);
-                Ok(CallToolResult::success(vec![Content::text(text)]))
-            }
-            Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
-        }
+            .search_recent_tweets(
+                query,
+                max_results,
+                params.sort_order.as_deref(),
+                params.pagination_token.as_deref(),
+            )
+            .await;
+
+        Ok(Self::ok_or_err(
+            result.map(|r| Self::format_search_results(query, &r.tweets, &r.next_token)),
+        ))
     }
 
     #[tool(
@@ -640,14 +647,11 @@ impl PostXServer {
         &self,
         Parameters(params): Parameters<TimelineParams>,
     ) -> Result<CallToolResult, McpError> {
-        let me = match self.ensure_me().await {
-            Ok(me) => me,
-            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
-        };
+        let me = try_tool!(Self::require_me(self.ensure_me().await));
 
         let max_results = params.max_results.unwrap_or(20).clamp(1, 100);
 
-        match self
+        let result = self
             .client
             .get_timeline(
                 &me.id,
@@ -655,15 +659,11 @@ impl PostXServer {
                 params.pagination_token.as_deref(),
                 params.exclude.as_deref(),
             )
-            .await
-        {
-            Ok(result) => {
-                let text =
-                    Self::format_search_results("timeline", &result.tweets, &result.next_token);
-                Ok(CallToolResult::success(vec![Content::text(text)]))
-            }
-            Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
-        }
+            .await;
+
+        Ok(Self::ok_or_err(
+            result.map(|r| Self::format_search_results("timeline", &r.tweets, &r.next_token)),
+        ))
     }
 
     #[tool(
@@ -675,17 +675,14 @@ impl PostXServer {
     ) -> Result<CallToolResult, McpError> {
         let max_results = params.max_results.unwrap_or(20).clamp(1, 100);
 
-        match self
+        let result = self
             .client
             .get_dm_events(max_results, params.pagination_token.as_deref())
-            .await
-        {
-            Ok(result) => {
-                let text = Self::format_dm_events(&result.events, &result.next_token);
-                Ok(CallToolResult::success(vec![Content::text(text)]))
-            }
-            Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
-        }
+            .await;
+
+        Ok(Self::ok_or_err(
+            result.map(|r| Self::format_dm_events(&r.events, &r.next_token)),
+        ))
     }
 
     #[tool(
@@ -708,16 +705,14 @@ impl PostXServer {
             )]));
         }
 
-        match self.client.send_dm(conversation_id, text).await {
-            Ok(result) => {
-                let msg = format!(
-                    "DM sent!\nConversation: {}\nEvent ID: {}",
-                    result.conversation_id, result.event_id
-                );
-                Ok(CallToolResult::success(vec![Content::text(msg)]))
-            }
-            Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
-        }
+        let result = self.client.send_dm(conversation_id, text).await;
+
+        Ok(Self::ok_or_err(result.map(|r| {
+            format!(
+                "DM sent!\nConversation: {}\nEvent ID: {}",
+                r.conversation_id, r.event_id
+            )
+        })))
     }
 }
 
@@ -737,8 +732,8 @@ impl ServerHandler for PostXServer {
             instructions: Some(
                 "X (Twitter) server. Tools: post_tweet, post_thread, upload_media, \
                  delete_tweet, search_tweets, get_timeline, get_me, lookup_user, \
-                 get_followers, get_following, like_tweet, unlike_tweet, retweet, \
-                 unretweet, get_dm_events, send_dm."
+                 get_followers, get_following, get_all_followers, get_all_following, \
+                 like_tweet, unlike_tweet, retweet, unretweet, get_dm_events, send_dm."
                     .to_string(),
             ),
         }
