@@ -495,6 +495,52 @@ impl PostXServer {
     }
 
     #[tool(
+        description = "Follow a user on X (Twitter). Accepts a username (with or without @) or numeric user ID."
+    )]
+    async fn follow_user(
+        &self,
+        Parameters(params): Parameters<LookupUserParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let me = try_tool!(Self::require_me(self.ensure_me().await));
+
+        let target_id = match self.client.resolve_user_id(&params.user).await {
+            Ok(id) => id,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+        };
+
+        Ok(Self::ok_or_err(
+            self.client
+                .follow_user(&me.id, &target_id)
+                .await
+                .map(|following| format!("Now following user {}: {following}", params.user.trim())),
+        ))
+    }
+
+    #[tool(
+        description = "Unfollow a user on X (Twitter). Accepts a username (with or without @) or numeric user ID."
+    )]
+    async fn unfollow_user(
+        &self,
+        Parameters(params): Parameters<LookupUserParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let me = try_tool!(Self::require_me(self.ensure_me().await));
+
+        let target_id = match self.client.resolve_user_id(&params.user).await {
+            Ok(id) => id,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+        };
+
+        Ok(Self::ok_or_err(
+            self.client
+                .unfollow_user(&me.id, &target_id)
+                .await
+                .map(|following| {
+                    format!("Unfollowed user {} (following: {following})", params.user.trim())
+                }),
+        ))
+    }
+
+    #[tool(
         description = "Look up an X (Twitter) user's profile by username or numeric user ID. Returns bio, location, follower/following counts, verified status, and more."
     )]
     async fn lookup_user(
@@ -719,23 +765,17 @@ impl PostXServer {
 #[tool_handler]
 impl ServerHandler for PostXServer {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo {
-            protocol_version: ProtocolVersion::default(),
-            capabilities: ServerCapabilities::builder().enable_tools().build(),
-            server_info: Implementation {
-                name: "mcp-server-post-x".to_string(),
-                title: None,
-                version: env!("CARGO_PKG_VERSION").to_string(),
-                icons: None,
-                website_url: None,
-            },
-            instructions: Some(
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_server_info(Implementation::new(
+                "mcp-server-post-x",
+                env!("CARGO_PKG_VERSION"),
+            ))
+            .with_instructions(
                 "X (Twitter) server. Tools: post_tweet, post_thread, upload_media, \
                  delete_tweet, search_tweets, get_timeline, get_me, lookup_user, \
                  get_followers, get_following, get_all_followers, get_all_following, \
-                 like_tweet, unlike_tweet, retweet, unretweet, get_dm_events, send_dm."
-                    .to_string(),
-            ),
-        }
+                 follow_user, unfollow_user, like_tweet, unlike_tweet, retweet, \
+                 unretweet, get_dm_events, send_dm.",
+            )
     }
 }

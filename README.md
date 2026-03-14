@@ -16,8 +16,10 @@ Communicates via stdio using JSON-RPC 2.0.
 | `get_timeline` | Get your home timeline in reverse chronological order |
 | `get_me` | Get the authenticated user's profile |
 | `lookup_user` | Look up any user by @username or numeric ID |
-| `get_followers` | List your followers |
-| `get_following` | List who you follow |
+| `get_followers` | List your followers (paginated) |
+| `get_following` | List who you follow (paginated) |
+| `get_all_followers` | Fetch ALL your followers in a single call (auto-paginates) |
+| `get_all_following` | Fetch ALL accounts you follow in a single call (auto-paginates) |
 | `like_tweet` | Like a tweet by ID or URL |
 | `unlike_tweet` | Unlike a tweet by ID or URL |
 | `retweet` | Retweet a tweet by ID or URL |
@@ -146,6 +148,10 @@ Returns a `media_id` to use with `post_tweet`'s `media_ids` param.
 |-------|------|----------|-------------|
 | `max_results` | integer | no | 1-100 (default 20) |
 | `pagination_token` | string | no | Next page token |
+
+### get_all_followers / get_all_following
+
+No parameters. Auto-paginates through all results (100 per page) and returns the complete list in a single response. Includes a 200ms delay between pages to respect rate limits.
 
 ### get_dm_events
 

@@ -5,6 +5,7 @@ use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 use rand::Rng;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use serde::de::DeserializeOwned;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::io::Read;
@@ -16,7 +17,6 @@ const MEDIA_UPLOAD_URL: &str = "https://upload.twitter.com/1.1/media/upload.json
 const MEDIA_METADATA_URL: &str = "https://upload.twitter.com/1.1/media/metadata/create.json";
 const ME_URL: &str = "https://api.x.com/2/users/me";
 
-const MAX_TWEET_LENGTH: usize = 280;
 const MAX_THREAD_LENGTH: usize = 25;
 const MAX_RETRIES: u32 = 3;
 const RETRY_BASE_DELAY_MS: u64 = 1000;
@@ -48,6 +48,15 @@ const RFC3986: &AsciiSet = &CONTROLS
 
 type HmacSha1 = Hmac<sha1::Sha1>;
 
+// --- Config ---
+
+const CONFIG_FIELDS: &[(&str, fn(&Config) -> &str)] = &[
+    ("api_key", |c| &c.api_key),
+    ("api_key_secret", |c| &c.api_key_secret),
+    ("access_token", |c| &c.access_token),
+    ("access_token_secret", |c| &c.access_token_secret),
+];
+
 #[derive(Clone, Deserialize)]
 pub struct Config {
     pub api_key: String,
@@ -69,17 +78,10 @@ impl fmt::Debug for Config {
 
 impl Config {
     pub fn validate(&self) -> Result<(), String> {
-        if self.api_key.trim().is_empty() {
-            return Err("'api_key' is empty in config".into());
-        }
-        if self.api_key_secret.trim().is_empty() {
-            return Err("'api_key_secret' is empty in config".into());
-        }
-        if self.access_token.trim().is_empty() {
-            return Err("'access_token' is empty in config".into());
-        }
-        if self.access_token_secret.trim().is_empty() {
-            return Err("'access_token_secret' is empty in config".into());
+        for (name, getter) in CONFIG_FIELDS {
+            if getter(self).trim().is_empty() {
+                return Err(format!("'{name}' is empty in config"));
+            }
         }
         Ok(())
     }
@@ -273,49 +275,26 @@ pub struct UserProfile {
     pub public_metrics: Option<PublicMetrics>,
 }
 
-// --- Like response types ---
+// --- Boolean action response (like, delete, retweet) ---
 
 #[derive(Deserialize)]
-struct LikeResponse {
-    data: LikeData,
+struct BoolResponse {
+    data: BoolData,
 }
 
 #[derive(Deserialize)]
-struct LikeData {
-    liked: bool,
+struct BoolData {
+    #[serde(alias = "liked", alias = "deleted", alias = "retweeted")]
+    result: bool,
 }
 
-// --- Delete tweet response types ---
+// --- Tweet list response (shared by timeline and search) ---
 
 #[derive(Deserialize)]
-struct DeleteTweetResponse {
-    data: DeleteTweetData,
-}
-
-#[derive(Deserialize)]
-struct DeleteTweetData {
-    deleted: bool,
-}
-
-// --- Retweet response types ---
-
-#[derive(Deserialize)]
-struct RetweetResponse {
-    data: RetweetData,
-}
-
-#[derive(Deserialize)]
-struct RetweetData {
-    retweeted: bool,
-}
-
-// --- Timeline response types ---
-
-#[derive(Deserialize)]
-struct TimelineResponse {
+struct TweetListResponse {
     data: Option<Vec<SearchTweet>>,
     includes: Option<SearchIncludes>,
-    meta: Option<SearchMeta>,
+    meta: Option<PaginationMeta>,
 }
 
 // --- DM response types ---
@@ -323,7 +302,7 @@ struct TimelineResponse {
 #[derive(Deserialize)]
 struct DmEventsResponse {
     data: Option<Vec<DmEvent>>,
-    meta: Option<DmMeta>,
+    meta: Option<PaginationMeta>,
 }
 
 #[derive(Deserialize)]
@@ -334,11 +313,6 @@ struct DmEvent {
     text: Option<String>,
     created_at: Option<String>,
     dm_conversation_id: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct DmMeta {
-    next_token: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -371,14 +345,7 @@ pub struct SendDmResult {
     pub event_id: String,
 }
 
-// --- Search response types ---
-
-#[derive(Deserialize)]
-struct SearchResponse {
-    data: Option<Vec<SearchTweet>>,
-    includes: Option<SearchIncludes>,
-    meta: Option<SearchMeta>,
-}
+// --- Search/tweet list types ---
 
 #[derive(Deserialize)]
 struct SearchTweet {
@@ -408,7 +375,7 @@ struct SearchUser {
 }
 
 #[derive(Deserialize)]
-struct SearchMeta {
+struct PaginationMeta {
     next_token: Option<String>,
 }
 
@@ -438,26 +405,143 @@ impl XClient {
         Self { config, http }
     }
 
-    pub async fn get_me(&self) -> Result<MeData, String> {
-        let resp = self
-            .retry_503(|| {
-                let auth = self.oauth_header("GET", ME_URL, &BTreeMap::new());
-                self.http.get(ME_URL).header("Authorization", auth)
-            })
-            .await?;
+    // --- Shared helpers: response checking, URL building, GET/POST ---
 
+    async fn check_response(&self, resp: reqwest::Response) -> Result<reqwest::Response, String> {
         self.check_auth_error(&resp);
         let status = resp.status();
+        if status.as_u16() == 429 {
+            let reset = self.rate_limit_reset(&resp);
+            return Err(format!("Rate limited (429). {reset}Try again later."));
+        }
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
             return Err(format!("X API error ({status}): {body}"));
         }
+        Ok(resp)
+    }
 
-        let me: MeResponse = resp
+    fn build_url(base: &str, params: &BTreeMap<String, String>) -> String {
+        if params.is_empty() {
+            return base.to_string();
+        }
+        let qs: String = params
+            .iter()
+            .map(|(k, v)| format!("{}={}", pct_encode(k), pct_encode(v)))
+            .collect::<Vec<_>>()
+            .join("&");
+        format!("{base}?{qs}")
+    }
+
+    async fn get_json<T: DeserializeOwned>(
+        &self,
+        base_url: &str,
+        params: &BTreeMap<String, String>,
+    ) -> Result<T, String> {
+        let full_url = Self::build_url(base_url, params);
+        let resp = self
+            .retry_503(|| {
+                let auth = self.oauth_header("GET", base_url, params);
+                self.http.get(&full_url).header("Authorization", auth)
+            })
+            .await?;
+        let resp = self.check_response(resp).await?;
+        resp.json::<T>()
+            .await
+            .map_err(|e| format!("Failed to parse response: {e}"))
+    }
+
+    async fn post_json_raw(
+        &self,
+        url: &str,
+        body: &impl Serialize,
+    ) -> Result<reqwest::Response, String> {
+        let resp = self
+            .retry_503(|| {
+                let auth = self.oauth_header("POST", url, &BTreeMap::new());
+                self.http
+                    .post(url)
+                    .header("Authorization", auth)
+                    .json(body)
+            })
+            .await?;
+        self.check_response(resp).await
+    }
+
+    async fn post_bool(&self, url: &str, body: &impl Serialize) -> Result<bool, String> {
+        let resp = self.post_json_raw(url, body).await?;
+        let r: BoolResponse = resp
             .json()
             .await
             .map_err(|e| format!("Failed to parse response: {e}"))?;
-        Ok(me.data)
+        Ok(r.data.result)
+    }
+
+    async fn delete_raw(&self, url: &str) -> Result<reqwest::Response, String> {
+        let resp = self
+            .retry_503(|| {
+                let auth = self.oauth_header("DELETE", url, &BTreeMap::new());
+                self.http.delete(url).header("Authorization", auth)
+            })
+            .await?;
+        self.check_response(resp).await
+    }
+
+    async fn delete_bool(&self, url: &str) -> Result<bool, String> {
+        let resp = self.delete_raw(url).await?;
+        let r: BoolResponse = resp
+            .json()
+            .await
+            .map_err(|e| format!("Failed to parse response: {e}"))?;
+        Ok(r.data.result)
+    }
+
+    fn map_tweet_list(response: TweetListResponse) -> SearchResult {
+        let user_map: std::collections::HashMap<String, String> = response
+            .includes
+            .and_then(|inc| inc.users)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|u| (u.id, u.username))
+            .collect();
+
+        let tweets = response
+            .data
+            .unwrap_or_default()
+            .into_iter()
+            .map(|t| {
+                let username = t
+                    .author_id
+                    .as_ref()
+                    .and_then(|aid| user_map.get(aid))
+                    .cloned();
+                let (like_count, retweet_count, reply_count) =
+                    t.public_metrics.map_or((0, 0, 0), |m| {
+                        (m.like_count, m.retweet_count, m.reply_count)
+                    });
+                SearchTweetResult {
+                    id: t.id,
+                    text: t.text,
+                    username,
+                    created_at: t.created_at,
+                    like_count,
+                    retweet_count,
+                    reply_count,
+                }
+            })
+            .collect();
+
+        SearchResult {
+            tweets,
+            next_token: response.meta.and_then(|m| m.next_token),
+        }
+    }
+
+    // --- Public API methods ---
+
+    pub async fn get_me(&self) -> Result<MeData, String> {
+        let resp: MeResponse = self.get_json(ME_URL, &BTreeMap::new()).await?;
+        Ok(resp.data)
     }
 
     // --- Media upload (public) ---
@@ -493,11 +577,9 @@ impl XClient {
 
         let (media_id, state) =
             if info.media_type == MediaType::Image && file_size <= 5 * 1024 * 1024 {
-                // Simple upload for small images
                 let id = self.simple_upload(file_path, &info.mime).await?;
                 (id, "succeeded".to_string())
             } else {
-                // Chunked upload for videos, GIFs, and large images
                 let media_id = self
                     .chunked_upload_init(file_size, &info.mime, info.media_type.media_category())
                     .await?;
@@ -516,7 +598,6 @@ impl XClient {
                 (media_id, state)
             };
 
-        // Set alt text if provided (images and GIFs only — video already rejected above)
         if let Some(alt) = alt_text {
             self.set_media_alt_text(&media_id, alt).await?;
         }
@@ -567,7 +648,6 @@ impl XClient {
             }
             validate_media_combination(&infos)?;
 
-            // Upload each attachment
             let mut ids = Vec::new();
             for attachment in media {
                 let result = self
@@ -588,38 +668,16 @@ impl XClient {
             None
         };
 
+        let text = text.replace('\u{2014}', "-").replace('\u{2013}', "-");
         let body = TweetBody {
-            text: text.to_string(),
+            text,
             media: resolved_ids.map(|ids| TweetMedia { media_ids: ids }),
             reply: reply_to.map(|id| TweetReply {
                 in_reply_to_tweet_id: id.to_string(),
             }),
         };
 
-        let resp = self
-            .retry_503(|| {
-                let auth = self.oauth_header("POST", TWEETS_URL, &BTreeMap::new());
-                self.http
-                    .post(TWEETS_URL)
-                    .header("Authorization", auth)
-                    .json(&body)
-            })
-            .await?;
-
-        self.check_auth_error(&resp);
-        let status = resp.status();
-        if status.as_u16() == 429 {
-            let reset = self.rate_limit_reset(&resp);
-            return Err(format!(
-                "Rate limited (429). {}Try again later.",
-                reset
-            ));
-        }
-        if !status.is_success() {
-            let body_text = resp.text().await.unwrap_or_default();
-            return Err(format!("X API error ({status}): {body_text}"));
-        }
-
+        let resp = self.post_json_raw(TWEETS_URL, &body).await?;
         let tweet: TweetResponse = resp
             .json()
             .await
@@ -659,11 +717,10 @@ impl XClient {
                 tokio::time::sleep(Duration::from_millis(500)).await;
             }
 
-            let result = self
+            match self
                 .post_tweet(text, media, None, reply_to.as_deref(), username)
-                .await;
-
-            match result {
+                .await
+            {
                 Ok(post) => {
                     reply_to = Some(post.tweet_id.clone());
                     posted.push(post);
@@ -709,6 +766,49 @@ impl XClient {
         self.get_follows(&url, max_results, pagination_token).await
     }
 
+    pub async fn get_all_followers(&self, user_id: &str) -> Result<Vec<UserSummary>, String> {
+        let url = format!("https://api.x.com/2/users/{user_id}/followers");
+        self.get_all_follows(&url).await
+    }
+
+    pub async fn get_all_following(&self, user_id: &str) -> Result<Vec<UserSummary>, String> {
+        let url = format!("https://api.x.com/2/users/{user_id}/following");
+        self.get_all_follows(&url).await
+    }
+
+    async fn get_all_follows(&self, base_url: &str) -> Result<Vec<UserSummary>, String> {
+        let mut all_users = Vec::new();
+        let mut next_token: Option<String> = None;
+        let mut page = 0u32;
+
+        loop {
+            page += 1;
+            tracing::info!(
+                "get_all_follows: fetching page {page}, collected {} so far",
+                all_users.len()
+            );
+            let result = self
+                .get_follows(base_url, 100, next_token.as_deref())
+                .await?;
+            tracing::info!(
+                "get_all_follows: page {page} returned {} users",
+                result.users.len()
+            );
+            all_users.extend(result.users);
+
+            match result.next_token {
+                Some(token) => next_token = Some(token),
+                None => break,
+            }
+
+            // Small delay to be respectful of rate limits
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+
+        tracing::info!("get_all_follows: done, total {} users", all_users.len());
+        Ok(all_users)
+    }
+
     async fn get_follows(
         &self,
         base_url: &str,
@@ -725,37 +825,7 @@ impl XClient {
             params.insert("pagination_token".to_string(), token.to_string());
         }
 
-        // Build query string for the URL
-        let query_string: String = params
-            .iter()
-            .map(|(k, v)| format!("{}={}", pct_encode(k), pct_encode(v)))
-            .collect::<Vec<_>>()
-            .join("&");
-        let full_url = format!("{base_url}?{query_string}");
-
-        let resp = self
-            .retry_503(|| {
-                // GET query params are included in OAuth signature
-                let auth = self.oauth_header("GET", base_url, &params);
-                self.http.get(&full_url).header("Authorization", auth)
-            })
-            .await?;
-
-        self.check_auth_error(&resp);
-        let status = resp.status();
-        if status.as_u16() == 429 {
-            let reset = self.rate_limit_reset(&resp);
-            return Err(format!("Rate limited (429). {reset}Try again later."));
-        }
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(format!("X API error ({status}): {body}"));
-        }
-
-        let response: FollowsResponse = resp
-            .json()
-            .await
-            .map_err(|e| format!("Failed to parse follows response: {e}"))?;
+        let response: FollowsResponse = self.get_json(base_url, &params).await?;
 
         Ok(FollowsResult {
             users: response.data.unwrap_or_default(),
@@ -765,10 +835,7 @@ impl XClient {
 
     // --- User lookup ---
 
-    pub async fn lookup_user_by_username(
-        &self,
-        username: &str,
-    ) -> Result<UserProfile, String> {
+    pub async fn lookup_user_by_username(&self, username: &str) -> Result<UserProfile, String> {
         let url = format!("https://api.x.com/2/users/by/username/{username}");
         self.get_user_profile(&url).await
     }
@@ -787,36 +854,7 @@ impl XClient {
                 .to_string(),
         );
 
-        let query_string: String = params
-            .iter()
-            .map(|(k, v)| format!("{}={}", pct_encode(k), pct_encode(v)))
-            .collect::<Vec<_>>()
-            .join("&");
-        let full_url = format!("{base_url}?{query_string}");
-
-        let resp = self
-            .retry_503(|| {
-                let auth = self.oauth_header("GET", base_url, &params);
-                self.http.get(&full_url).header("Authorization", auth)
-            })
-            .await?;
-
-        self.check_auth_error(&resp);
-        let status = resp.status();
-        if status.as_u16() == 429 {
-            let reset = self.rate_limit_reset(&resp);
-            return Err(format!("Rate limited (429). {reset}Try again later."));
-        }
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(format!("X API error ({status}): {body}"));
-        }
-
-        let response: UserLookupResponse = resp
-            .json()
-            .await
-            .map_err(|e| format!("Failed to parse user lookup response: {e}"))?;
-
+        let response: UserLookupResponse = self.get_json(base_url, &params).await?;
         response.data.ok_or_else(|| "User not found".to_string())
     }
 
@@ -824,161 +862,67 @@ impl XClient {
 
     pub async fn like_tweet(&self, user_id: &str, tweet_id: &str) -> Result<bool, String> {
         let url = format!("https://api.x.com/2/users/{user_id}/likes");
-        let body = serde_json::json!({ "tweet_id": tweet_id });
-
-        let resp = self
-            .retry_503(|| {
-                let auth = self.oauth_header("POST", &url, &BTreeMap::new());
-                self.http
-                    .post(&url)
-                    .header("Authorization", auth)
-                    .json(&body)
-            })
-            .await?;
-
-        self.check_auth_error(&resp);
-        let status = resp.status();
-        if status.as_u16() == 429 {
-            let reset = self.rate_limit_reset(&resp);
-            return Err(format!("Rate limited (429). {reset}Try again later."));
-        }
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(format!("X API error ({status}): {body}"));
-        }
-
-        let response: LikeResponse = resp
-            .json()
-            .await
-            .map_err(|e| format!("Failed to parse like response: {e}"))?;
-
-        Ok(response.data.liked)
+        self.post_bool(&url, &serde_json::json!({ "tweet_id": tweet_id })).await
     }
 
     pub async fn unlike_tweet(&self, user_id: &str, tweet_id: &str) -> Result<bool, String> {
         let url = format!("https://api.x.com/2/users/{user_id}/likes/{tweet_id}");
-
-        let resp = self
-            .retry_503(|| {
-                let auth = self.oauth_header("DELETE", &url, &BTreeMap::new());
-                self.http
-                    .delete(&url)
-                    .header("Authorization", auth)
-            })
-            .await?;
-
-        self.check_auth_error(&resp);
-        let status = resp.status();
-        if status.as_u16() == 429 {
-            let reset = self.rate_limit_reset(&resp);
-            return Err(format!("Rate limited (429). {reset}Try again later."));
-        }
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(format!("X API error ({status}): {body}"));
-        }
-
-        let response: LikeResponse = resp
-            .json()
-            .await
-            .map_err(|e| format!("Failed to parse unlike response: {e}"))?;
-
-        Ok(response.data.liked)
+        self.delete_bool(&url).await
     }
-
-    // --- Delete tweet ---
 
     pub async fn delete_tweet(&self, tweet_id: &str) -> Result<bool, String> {
-        let url = format!("{TWEETS_URL}/{tweet_id}");
-
-        let resp = self
-            .retry_503(|| {
-                let auth = self.oauth_header("DELETE", &url, &BTreeMap::new());
-                self.http.delete(&url).header("Authorization", auth)
-            })
-            .await?;
-
-        self.check_auth_error(&resp);
-        let status = resp.status();
-        if status.as_u16() == 429 {
-            let reset = self.rate_limit_reset(&resp);
-            return Err(format!("Rate limited (429). {reset}Try again later."));
-        }
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(format!("X API error ({status}): {body}"));
-        }
-
-        let response: DeleteTweetResponse = resp
-            .json()
-            .await
-            .map_err(|e| format!("Failed to parse delete response: {e}"))?;
-
-        Ok(response.data.deleted)
+        self.delete_bool(&format!("{TWEETS_URL}/{tweet_id}")).await
     }
-
-    // --- Retweets ---
 
     pub async fn retweet(&self, user_id: &str, tweet_id: &str) -> Result<bool, String> {
         let url = format!("https://api.x.com/2/users/{user_id}/retweets");
-        let body = serde_json::json!({ "tweet_id": tweet_id });
-
-        let resp = self
-            .retry_503(|| {
-                let auth = self.oauth_header("POST", &url, &BTreeMap::new());
-                self.http
-                    .post(&url)
-                    .header("Authorization", auth)
-                    .json(&body)
-            })
-            .await?;
-
-        self.check_auth_error(&resp);
-        let status = resp.status();
-        if status.as_u16() == 429 {
-            let reset = self.rate_limit_reset(&resp);
-            return Err(format!("Rate limited (429). {reset}Try again later."));
-        }
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(format!("X API error ({status}): {body}"));
-        }
-
-        let response: RetweetResponse = resp
-            .json()
-            .await
-            .map_err(|e| format!("Failed to parse retweet response: {e}"))?;
-
-        Ok(response.data.retweeted)
+        self.post_bool(&url, &serde_json::json!({ "tweet_id": tweet_id })).await
     }
 
     pub async fn unretweet(&self, user_id: &str, tweet_id: &str) -> Result<bool, String> {
         let url = format!("https://api.x.com/2/users/{user_id}/retweets/{tweet_id}");
+        self.delete_bool(&url).await
+    }
 
+    // --- Follows ---
+
+    pub async fn follow_user(&self, user_id: &str, target_user_id: &str) -> Result<bool, String> {
+        let url = format!("https://api.x.com/2/users/{user_id}/following");
         let resp = self
-            .retry_503(|| {
-                let auth = self.oauth_header("DELETE", &url, &BTreeMap::new());
-                self.http.delete(&url).header("Authorization", auth)
-            })
+            .post_json_raw(&url, &serde_json::json!({ "target_user_id": target_user_id }))
             .await?;
-
-        self.check_auth_error(&resp);
-        let status = resp.status();
-        if status.as_u16() == 429 {
-            let reset = self.rate_limit_reset(&resp);
-            return Err(format!("Rate limited (429). {reset}Try again later."));
-        }
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(format!("X API error ({status}): {body}"));
-        }
-
-        let response: RetweetResponse = resp
+        let r: serde_json::Value = resp
             .json()
             .await
-            .map_err(|e| format!("Failed to parse unretweet response: {e}"))?;
+            .map_err(|e| format!("Failed to parse response: {e}"))?;
+        Ok(r["data"]["following"].as_bool().unwrap_or(false))
+    }
 
-        Ok(response.data.retweeted)
+    pub async fn unfollow_user(
+        &self,
+        user_id: &str,
+        target_user_id: &str,
+    ) -> Result<bool, String> {
+        let url = format!("https://api.x.com/2/users/{user_id}/following/{target_user_id}");
+        let resp = self.delete_raw(&url).await?;
+        let r: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| format!("Failed to parse response: {e}"))?;
+        Ok(r["data"]["following"].as_bool().unwrap_or(false))
+    }
+
+    /// Resolve a username or user ID to a numeric user ID.
+    pub async fn resolve_user_id(&self, user: &str) -> Result<String, String> {
+        let trimmed = user.trim().strip_prefix('@').unwrap_or(user.trim());
+        if trimmed.is_empty() {
+            return Err("User parameter cannot be empty.".to_string());
+        }
+        if trimmed.chars().all(|c| c.is_ascii_digit()) {
+            return Ok(trimmed.to_string());
+        }
+        let profile = self.lookup_user_by_username(trimmed).await?;
+        Ok(profile.id)
     }
 
     // --- Timeline ---
@@ -994,14 +938,7 @@ impl XClient {
             "https://api.x.com/2/users/{user_id}/timelines/reverse_chronological"
         );
 
-        let mut params = BTreeMap::new();
-        params.insert("max_results".to_string(), max_results.to_string());
-        params.insert(
-            "tweet.fields".to_string(),
-            "id,text,author_id,created_at,public_metrics".to_string(),
-        );
-        params.insert("expansions".to_string(), "author_id".to_string());
-        params.insert("user.fields".to_string(), "username".to_string());
+        let mut params = tweet_list_params(max_results);
         if let Some(token) = pagination_token {
             params.insert("pagination_token".to_string(), token.to_string());
         }
@@ -1009,74 +946,8 @@ impl XClient {
             params.insert("exclude".to_string(), exc.to_string());
         }
 
-        let query_string: String = params
-            .iter()
-            .map(|(k, v)| format!("{}={}", pct_encode(k), pct_encode(v)))
-            .collect::<Vec<_>>()
-            .join("&");
-        let full_url = format!("{base_url}?{query_string}");
-
-        let resp = self
-            .retry_503(|| {
-                let auth = self.oauth_header("GET", &base_url, &params);
-                self.http.get(&full_url).header("Authorization", auth)
-            })
-            .await?;
-
-        self.check_auth_error(&resp);
-        let status = resp.status();
-        if status.as_u16() == 429 {
-            let reset = self.rate_limit_reset(&resp);
-            return Err(format!("Rate limited (429). {reset}Try again later."));
-        }
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(format!("X API error ({status}): {body}"));
-        }
-
-        let response: TimelineResponse = resp
-            .json()
-            .await
-            .map_err(|e| format!("Failed to parse timeline response: {e}"))?;
-
-        let user_map: std::collections::HashMap<String, String> = response
-            .includes
-            .and_then(|inc| inc.users)
-            .unwrap_or_default()
-            .into_iter()
-            .map(|u| (u.id, u.username))
-            .collect();
-
-        let tweets = response
-            .data
-            .unwrap_or_default()
-            .into_iter()
-            .map(|t| {
-                let username = t
-                    .author_id
-                    .as_ref()
-                    .and_then(|aid| user_map.get(aid))
-                    .cloned();
-                let (like_count, retweet_count, reply_count) =
-                    t.public_metrics.map_or((0, 0, 0), |m| {
-                        (m.like_count, m.retweet_count, m.reply_count)
-                    });
-                SearchTweetResult {
-                    id: t.id,
-                    text: t.text,
-                    username,
-                    created_at: t.created_at,
-                    like_count,
-                    retweet_count,
-                    reply_count,
-                }
-            })
-            .collect();
-
-        Ok(SearchResult {
-            tweets,
-            next_token: response.meta.and_then(|m| m.next_token),
-        })
+        let response: TweetListResponse = self.get_json(&base_url, &params).await?;
+        Ok(Self::map_tweet_list(response))
     }
 
     // --- Direct Messages ---
@@ -1099,35 +970,7 @@ impl XClient {
             params.insert("pagination_token".to_string(), token.to_string());
         }
 
-        let query_string: String = params
-            .iter()
-            .map(|(k, v)| format!("{}={}", pct_encode(k), pct_encode(v)))
-            .collect::<Vec<_>>()
-            .join("&");
-        let full_url = format!("{base_url}?{query_string}");
-
-        let resp = self
-            .retry_503(|| {
-                let auth = self.oauth_header("GET", base_url, &params);
-                self.http.get(&full_url).header("Authorization", auth)
-            })
-            .await?;
-
-        self.check_auth_error(&resp);
-        let status = resp.status();
-        if status.as_u16() == 429 {
-            let reset = self.rate_limit_reset(&resp);
-            return Err(format!("Rate limited (429). {reset}Try again later."));
-        }
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(format!("X API error ({status}): {body}"));
-        }
-
-        let response: DmEventsResponse = resp
-            .json()
-            .await
-            .map_err(|e| format!("Failed to parse DM events response: {e}"))?;
+        let response: DmEventsResponse = self.get_json(base_url, &params).await?;
 
         let events = response
             .data
@@ -1159,27 +1002,7 @@ impl XClient {
         );
         let body = serde_json::json!({ "text": text });
 
-        let resp = self
-            .retry_503(|| {
-                let auth = self.oauth_header("POST", &url, &BTreeMap::new());
-                self.http
-                    .post(&url)
-                    .header("Authorization", auth)
-                    .json(&body)
-            })
-            .await?;
-
-        self.check_auth_error(&resp);
-        let status = resp.status();
-        if status.as_u16() == 429 {
-            let reset = self.rate_limit_reset(&resp);
-            return Err(format!("Rate limited (429). {reset}Try again later."));
-        }
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(format!("X API error ({status}): {body}"));
-        }
-
+        let resp = self.post_json_raw(&url, &body).await?;
         let response: SendDmResponse = resp
             .json()
             .await
@@ -1202,15 +1025,8 @@ impl XClient {
     ) -> Result<SearchResult, String> {
         let base_url = "https://api.x.com/2/tweets/search/recent";
 
-        let mut params = BTreeMap::new();
+        let mut params = tweet_list_params(max_results);
         params.insert("query".to_string(), query.to_string());
-        params.insert("max_results".to_string(), max_results.to_string());
-        params.insert(
-            "tweet.fields".to_string(),
-            "id,text,author_id,created_at,public_metrics".to_string(),
-        );
-        params.insert("expansions".to_string(), "author_id".to_string());
-        params.insert("user.fields".to_string(), "username".to_string());
         if let Some(order) = sort_order {
             params.insert("sort_order".to_string(), order.to_string());
         }
@@ -1218,78 +1034,11 @@ impl XClient {
             params.insert("pagination_token".to_string(), token.to_string());
         }
 
-        let query_string: String = params
-            .iter()
-            .map(|(k, v)| format!("{}={}", pct_encode(k), pct_encode(v)))
-            .collect::<Vec<_>>()
-            .join("&");
-        let full_url = format!("{base_url}?{query_string}");
-
-        let resp = self
-            .retry_503(|| {
-                let auth = self.oauth_header("GET", base_url, &params);
-                self.http.get(&full_url).header("Authorization", auth)
-            })
-            .await?;
-
-        self.check_auth_error(&resp);
-        let status = resp.status();
-        if status.as_u16() == 429 {
-            let reset = self.rate_limit_reset(&resp);
-            return Err(format!("Rate limited (429). {reset}Try again later."));
-        }
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(format!("X API error ({status}): {body}"));
-        }
-
-        let response: SearchResponse = resp
-            .json()
-            .await
-            .map_err(|e| format!("Failed to parse search response: {e}"))?;
-
-        // Build author_id -> username lookup from includes
-        let user_map: std::collections::HashMap<String, String> = response
-            .includes
-            .and_then(|inc| inc.users)
-            .unwrap_or_default()
-            .into_iter()
-            .map(|u| (u.id, u.username))
-            .collect();
-
-        let tweets = response
-            .data
-            .unwrap_or_default()
-            .into_iter()
-            .map(|t| {
-                let username = t
-                    .author_id
-                    .as_ref()
-                    .and_then(|aid| user_map.get(aid))
-                    .cloned();
-                let (like_count, retweet_count, reply_count) =
-                    t.public_metrics.map_or((0, 0, 0), |m| {
-                        (m.like_count, m.retweet_count, m.reply_count)
-                    });
-                SearchTweetResult {
-                    id: t.id,
-                    text: t.text,
-                    username,
-                    created_at: t.created_at,
-                    like_count,
-                    retweet_count,
-                    reply_count,
-                }
-            })
-            .collect();
-
-        Ok(SearchResult {
-            tweets,
-            next_token: response.meta.and_then(|m| m.next_token),
-        })
+        let response: TweetListResponse = self.get_json(base_url, &params).await?;
+        Ok(Self::map_tweet_list(response))
     }
 
-    // --- Simple upload (images ≤5MB) ---
+    // --- Simple upload (images <=5MB) ---
 
     async fn simple_upload(&self, file_path: &Path, mime: &str) -> Result<String, String> {
         let file_bytes =
@@ -1316,16 +1065,7 @@ impl XClient {
             })
             .await?;
 
-        self.check_auth_error(&resp);
-        let status = resp.status();
-        if status.as_u16() == 429 {
-            let reset = self.rate_limit_reset(&resp);
-            return Err(format!("Media upload rate limited (429). {reset}"));
-        }
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(format!("Media upload error ({status}): {body}"));
-        }
+        let resp = self.check_response(resp).await?;
 
         let media: SimpleMediaResponse = resp
             .json()
@@ -1350,7 +1090,6 @@ impl XClient {
 
         let resp = self
             .retry_503(|| {
-                // Form-encoded params are included in OAuth signature
                 let auth = self.oauth_header("POST", MEDIA_UPLOAD_URL, &params);
                 self.http
                     .post(MEDIA_UPLOAD_URL)
@@ -1359,12 +1098,7 @@ impl XClient {
             })
             .await?;
 
-        self.check_auth_error(&resp);
-        let status = resp.status();
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(format!("Media INIT error ({status}): {body}"));
-        }
+        let resp = self.check_response(resp).await?;
 
         let media: ChunkedMediaResponse = resp
             .json()
@@ -1397,7 +1131,6 @@ impl XClient {
                 break;
             }
 
-            // Retry this chunk up to 2 extra times on failure
             let mut last_err = String::new();
             let mut success = false;
             for attempt in 0..3 {
@@ -1488,12 +1221,7 @@ impl XClient {
             })
             .await?;
 
-        self.check_auth_error(&resp);
-        let status = resp.status();
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(format!("Media FINALIZE error ({status}): {body}"));
-        }
+        let resp = self.check_response(resp).await?;
 
         resp.json::<ChunkedMediaResponse>()
             .await
@@ -1512,29 +1240,8 @@ impl XClient {
             params.insert("command".into(), "STATUS".into());
             params.insert("media_id".into(), media_id.to_string());
 
-            let url = format!(
-                "{}?command=STATUS&media_id={}",
-                MEDIA_UPLOAD_URL, media_id
-            );
-
-            let resp = self
-                .retry_503(|| {
-                    // GET query params are included in OAuth signature
-                    let auth = self.oauth_header("GET", MEDIA_UPLOAD_URL, &params);
-                    self.http.get(&url).header("Authorization", auth)
-                })
-                .await?;
-
-            let status = resp.status();
-            if !status.is_success() {
-                let body = resp.text().await.unwrap_or_default();
-                return Err(format!("Media STATUS error ({status}): {body}"));
-            }
-
-            let response: ChunkedMediaResponse = resp
-                .json()
-                .await
-                .map_err(|e| format!("Failed to parse STATUS response: {e}"))?;
+            let response: ChunkedMediaResponse =
+                self.get_json(MEDIA_UPLOAD_URL, &params).await?;
 
             match response.processing_info {
                 Some(info) => match info.state.as_str() {
@@ -1565,7 +1272,6 @@ impl XClient {
                     }
                 },
                 None => {
-                    // No processing_info means processing is complete
                     return Ok("succeeded".into());
                 }
             }
@@ -1582,23 +1288,7 @@ impl XClient {
             }
         });
 
-        let resp = self
-            .retry_503(|| {
-                let auth = self.oauth_header("POST", MEDIA_METADATA_URL, &BTreeMap::new());
-                self.http
-                    .post(MEDIA_METADATA_URL)
-                    .header("Authorization", auth)
-                    .json(&body)
-            })
-            .await?;
-
-        self.check_auth_error(&resp);
-        let status = resp.status();
-        if !status.is_success() {
-            let body_text = resp.text().await.unwrap_or_default();
-            return Err(format!("Alt text error ({status}): {body_text}"));
-        }
-
+        self.post_json_raw(MEDIA_METADATA_URL, &body).await?;
         Ok(())
     }
 
@@ -1607,12 +1297,6 @@ impl XClient {
     fn validate_tweet_text(&self, text: &str) -> Result<(), String> {
         if text.trim().is_empty() {
             return Err("Tweet text cannot be empty".into());
-        }
-        if text.chars().count() > MAX_TWEET_LENGTH {
-            return Err(format!(
-                "Tweet text is {} characters (max {MAX_TWEET_LENGTH})",
-                text.chars().count()
-            ));
         }
         Ok(())
     }
@@ -1740,6 +1424,18 @@ impl XClient {
 
 fn pct_encode(input: &str) -> String {
     utf8_percent_encode(input, RFC3986).to_string()
+}
+
+fn tweet_list_params(max_results: u32) -> BTreeMap<String, String> {
+    let mut params = BTreeMap::new();
+    params.insert("max_results".to_string(), max_results.to_string());
+    params.insert(
+        "tweet.fields".to_string(),
+        "id,text,author_id,created_at,public_metrics".to_string(),
+    );
+    params.insert("expansions".to_string(), "author_id".to_string());
+    params.insert("user.fields".to_string(), "username".to_string());
+    params
 }
 
 fn media_info_from_path(path: &Path) -> Result<MediaInfo, String> {
