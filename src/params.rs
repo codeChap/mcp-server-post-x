@@ -45,6 +45,10 @@ pub struct PostTweetParams {
         description = "Pre-uploaded media IDs to attach (max 4). Cannot be used with media. Type validation is skipped for pre-uploaded IDs."
     )]
     pub media_ids: Option<Vec<String>>,
+    #[schemars(
+        description = "Tweet ID to reply to (e.g. '123456'). When set, the tweet is posted as a reply to the specified tweet."
+    )]
+    pub reply_to: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]

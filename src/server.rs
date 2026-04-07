@@ -314,7 +314,7 @@ impl PostXServer {
                 &params.text,
                 &media_attachments,
                 params.media_ids.as_deref(),
-                None,
+                params.reply_to.as_deref(),
                 &me.username,
             )
             .await;
