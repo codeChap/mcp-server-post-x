@@ -22,7 +22,15 @@ impl From<MediaAttachmentParam> for MediaAttachment {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct AccountOnlyParams {
+    #[schemars(description = "Account name to use (omit for default account)")]
+    pub account: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct UploadMediaParams {
+    #[schemars(description = "Account name to use (omit for default account)")]
+    pub account: Option<String>,
     #[schemars(
         description = "Local file path to media file. Supported: jpeg/png/webp (max 5MB), gif (max 15MB), mp4 (max 512MB)"
     )]
@@ -35,6 +43,8 @@ pub struct UploadMediaParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct PostTweetParams {
+    #[schemars(description = "Account name to use (omit for default account)")]
+    pub account: Option<String>,
     #[schemars(description = "The tweet text")]
     pub text: String,
     #[schemars(
@@ -61,6 +71,8 @@ pub struct ThreadTweet {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct PostThreadParams {
+    #[schemars(description = "Account name to use (omit for default account)")]
+    pub account: Option<String>,
     #[schemars(
         description = "Array of tweets to post as a thread (max 25). Each tweet has 'text' and optional 'media'."
     )]
@@ -69,6 +81,8 @@ pub struct PostThreadParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct TimelineParams {
+    #[schemars(description = "Account name to use (omit for default account)")]
+    pub account: Option<String>,
     #[schemars(description = "Maximum results to return (1-100, default 20)")]
     pub max_results: Option<u32>,
     #[schemars(description = "Exclude 'replies', 'retweets', or both comma-separated")]
@@ -79,6 +93,8 @@ pub struct TimelineParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct GetDmEventsParams {
+    #[schemars(description = "Account name to use (omit for default account)")]
+    pub account: Option<String>,
     #[schemars(description = "Maximum results to return (1-100, default 20)")]
     pub max_results: Option<u32>,
     #[schemars(description = "Pagination token from a previous response to get the next page")]
@@ -87,6 +103,8 @@ pub struct GetDmEventsParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SendDmParams {
+    #[schemars(description = "Account name to use (omit for default account)")]
+    pub account: Option<String>,
     #[schemars(
         description = "The DM conversation ID (e.g. '123456-789012' for 1-on-1 conversations)"
     )]
@@ -97,6 +115,8 @@ pub struct SendDmParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SearchTweetsParams {
+    #[schemars(description = "Account name to use (omit for default account)")]
+    pub account: Option<String>,
     #[schemars(
         description = "Search query. Supports Twitter operators like from:user, #hashtag, @mention, \"exact phrase\", -exclude, lang:en, etc."
     )]
@@ -113,6 +133,8 @@ pub struct SearchTweetsParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct TweetIdParams {
+    #[schemars(description = "Account name to use (omit for default account)")]
+    pub account: Option<String>,
     #[schemars(
         description = "The tweet ID or tweet URL (e.g. '123456' or 'https://x.com/user/status/123456')"
     )]
@@ -121,12 +143,16 @@ pub struct TweetIdParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct LookupUserParams {
+    #[schemars(description = "Account name to use (omit for default account)")]
+    pub account: Option<String>,
     #[schemars(description = "Username (with or without @) or numeric user ID")]
     pub user: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct FollowsLookupParams {
+    #[schemars(description = "Account name to use (omit for default account)")]
+    pub account: Option<String>,
     #[schemars(description = "Maximum number of results to return (1-100, default 20)")]
     pub max_results: Option<u32>,
     #[schemars(description = "Pagination token from a previous response to get the next page")]

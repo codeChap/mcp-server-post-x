@@ -6,7 +6,7 @@ use rand::Rng;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde::de::DeserializeOwned;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::io::Read;
 use std::path::Path;
@@ -50,7 +50,7 @@ type HmacSha1 = Hmac<sha1::Sha1>;
 
 // --- Config ---
 
-const CONFIG_FIELDS: &[(&str, fn(&Config) -> &str)] = &[
+const ACCOUNT_CONFIG_FIELDS: &[(&str, fn(&AccountConfig) -> &str)] = &[
     ("api_key", |c| &c.api_key),
     ("api_key_secret", |c| &c.api_key_secret),
     ("access_token", |c| &c.access_token),
@@ -58,16 +58,16 @@ const CONFIG_FIELDS: &[(&str, fn(&Config) -> &str)] = &[
 ];
 
 #[derive(Clone, Deserialize)]
-pub struct Config {
+pub struct AccountConfig {
     pub api_key: String,
     pub api_key_secret: String,
     pub access_token: String,
     pub access_token_secret: String,
 }
 
-impl fmt::Debug for Config {
+impl fmt::Debug for AccountConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Config")
+        f.debug_struct("AccountConfig")
             .field("api_key", &"***REDACTED***")
             .field("api_key_secret", &"***REDACTED***")
             .field("access_token", &"***REDACTED***")
@@ -76,14 +76,67 @@ impl fmt::Debug for Config {
     }
 }
 
-impl Config {
+impl AccountConfig {
     pub fn validate(&self) -> Result<(), String> {
-        for (name, getter) in CONFIG_FIELDS {
+        for (name, getter) in ACCOUNT_CONFIG_FIELDS {
             if getter(self).trim().is_empty() {
                 return Err(format!("'{name}' is empty in config"));
             }
         }
         Ok(())
+    }
+}
+
+pub struct AppConfig {
+    pub accounts: HashMap<String, AccountConfig>,
+    pub default_account: String,
+}
+
+impl AppConfig {
+    pub fn from_toml(content: &str) -> Result<Self, String> {
+        #[derive(Deserialize)]
+        struct RawConfig {
+            default_account: Option<String>,
+            accounts: HashMap<String, AccountConfig>,
+        }
+
+        let raw: RawConfig = toml::from_str(content)
+            .map_err(|e| format!("Failed to parse config: {e}"))?;
+
+        if raw.accounts.is_empty() {
+            return Err("[accounts] section is empty or missing".into());
+        }
+
+        for (name, acct) in &raw.accounts {
+            acct.validate()
+                .map_err(|e| format!("Account '{name}': {e}"))?;
+        }
+
+        let default_account = if let Some(da) = raw.default_account {
+            if !raw.accounts.contains_key(&da) {
+                let available: Vec<&str> =
+                    raw.accounts.keys().map(|s| s.as_str()).collect();
+                return Err(format!(
+                    "default_account '{da}' not found in [accounts]. Available: {}",
+                    available.join(", ")
+                ));
+            }
+            da
+        } else if raw.accounts.len() == 1 {
+            raw.accounts.keys().next().unwrap().clone()
+        } else {
+            let available: Vec<&str> =
+                raw.accounts.keys().map(|s| s.as_str()).collect();
+            return Err(format!(
+                "Multiple accounts configured but no default_account specified. Available: {}",
+                available.join(", ")
+            ));
+        };
+
+        Ok(AppConfig {
+            accounts: raw.accounts,
+            default_account,
+        })
     }
 }
 
@@ -136,7 +189,7 @@ pub struct MediaUploadResult {
 // --- API response types ---
 
 pub struct XClient {
-    config: Config,
+    config: AccountConfig,
     http: Client,
 }
 
@@ -397,11 +450,7 @@ pub struct SearchTweetResult {
 // --- XClient implementation ---
 
 impl XClient {
-    pub fn new(config: Config) -> Self {
-        let http = Client::builder()
-            .timeout(Duration::from_secs(60))
-            .build()
-            .expect("failed to build HTTP client");
+    pub fn new(config: AccountConfig, http: Client) -> Self {
         Self { config, http }
     }
 

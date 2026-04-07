@@ -8,46 +8,94 @@ macro_rules! try_tool {
 }
 
 use crate::api::{
-    Config, DmEventResult, MeData, MediaAttachment, PostResult, SearchTweetResult, UserProfile,
+    AppConfig, DmEventResult, MeData, MediaAttachment, PostResult, SearchTweetResult, UserProfile,
     UserSummary, XClient,
 };
 use crate::params::{
-    FollowsLookupParams, GetDmEventsParams, LookupUserParams, PostThreadParams, PostTweetParams,
-    SearchTweetsParams, SendDmParams, TimelineParams, TweetIdParams, UploadMediaParams,
+    AccountOnlyParams, FollowsLookupParams, GetDmEventsParams, LookupUserParams,
+    PostThreadParams, PostTweetParams, SearchTweetsParams, SendDmParams, TimelineParams,
+    TweetIdParams, UploadMediaParams,
 };
+use reqwest::Client;
 use rmcp::{
     ErrorData as McpError, ServerHandler, handler::server::tool::ToolRouter,
     handler::server::wrapper::Parameters, model::*, tool, tool_handler, tool_router,
 };
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Mutex;
 
 #[derive(Clone)]
 pub struct PostXServer {
-    client: Arc<XClient>,
-    cached_me: Arc<Mutex<Option<MeData>>>,
+    clients: HashMap<String, Arc<XClient>>,
+    default_account: String,
+    cached_me: Arc<Mutex<HashMap<String, MeData>>>,
+    instructions: String,
     tool_router: ToolRouter<Self>,
 }
 
 impl PostXServer {
-    async fn ensure_me(&self) -> Result<MeData, String> {
+    fn resolve_account<'a>(
+        &'a self,
+        account: Option<&'a str>,
+    ) -> Result<(&'a str, &'a Arc<XClient>), String> {
+        let name = match account {
+            Some(a) if !a.trim().is_empty() => a.trim(),
+            _ => &self.default_account,
+        };
+        let client = self.clients.get(name).ok_or_else(|| {
+            let available: Vec<&str> = self.clients.keys().map(|s| s.as_str()).collect();
+            format!(
+                "Unknown account '{name}'. Available: {}",
+                available.join(", ")
+            )
+        })?;
+        Ok((name, client))
+    }
+
+    fn require_account<'a>(
+        &'a self,
+        account: Option<&'a str>,
+    ) -> Result<(&'a str, &'a Arc<XClient>), CallToolResult> {
+        self.resolve_account(account)
+            .map_err(|e| CallToolResult::error(vec![Content::text(e)]))
+    }
+
+    async fn ensure_me(&self, account: Option<&str>) -> Result<(String, MeData), String> {
+        let (name, client) = self.resolve_account(account)?;
         {
             let cached = self.cached_me.lock().await;
-            if let Some(ref me) = *cached {
-                return Ok(me.clone());
+            if let Some(me) = cached.get(name) {
+                return Ok((name.to_string(), me.clone()));
             }
         }
 
-        let me = self.client.get_me().await?;
+        let me = client.get_me().await?;
         {
             let mut cached = self.cached_me.lock().await;
-            *cached = Some(me.clone());
+            cached.insert(name.to_string(), me.clone());
         }
-        Ok(me)
+        Ok((name.to_string(), me))
     }
 
-    fn require_me(result: Result<MeData, String>) -> Result<MeData, CallToolResult> {
-        result.map_err(|e| CallToolResult::error(vec![Content::text(e)]))
+    fn require_me_for(
+        &self,
+        account: Option<&str>,
+    ) -> impl std::future::Future<Output = Result<(String, Arc<XClient>, MeData), CallToolResult>> + '_
+    {
+        let account = account.map(|s| s.to_string());
+        async move {
+            let (name, client) = self
+                .resolve_account(account.as_deref())
+                .map_err(|e| CallToolResult::error(vec![Content::text(e)]))?;
+            let client = client.clone();
+            let (name, me) = self
+                .ensure_me(Some(name))
+                .await
+                .map_err(|e| CallToolResult::error(vec![Content::text(e)]))?;
+            Ok((name, client, me))
+        }
     }
 
     fn require_tweet_id(raw: &str) -> Result<&str, CallToolResult> {
@@ -68,8 +116,11 @@ impl PostXServer {
         }
     }
 
-    fn format_post_result(result: &PostResult) -> String {
-        format!("Tweet posted!\nID: {}\nURL: {}", result.tweet_id, result.url)
+    fn format_post_result(result: &PostResult, account: &str) -> String {
+        format!(
+            "Tweet posted as @{account}!\nID: {}\nURL: {}",
+            result.tweet_id, result.url
+        )
     }
 
     fn truncate_str(s: &str, max_bytes: usize) -> &str {
@@ -276,12 +327,76 @@ impl PostXServer {
 
 #[tool_router]
 impl PostXServer {
-    pub fn new(config: Config) -> Self {
+    pub fn new(config: AppConfig) -> Self {
+        let http = Client::builder()
+            .timeout(Duration::from_secs(60))
+            .build()
+            .expect("failed to build HTTP client");
+
+        let default_account = config.default_account.clone();
+
+        let account_names: Vec<String> = config.accounts.keys().cloned().collect();
+
+        let clients: HashMap<String, Arc<XClient>> = config
+            .accounts
+            .into_iter()
+            .map(|(name, acct)| (name, Arc::new(XClient::new(acct, http.clone()))))
+            .collect();
+
+        let instructions = {
+            let accounts_str: Vec<String> = account_names
+                .iter()
+                .map(|name| {
+                    if name == &default_account {
+                        format!("{name} (default)")
+                    } else {
+                        name.clone()
+                    }
+                })
+                .collect();
+            format!(
+                "X (Twitter) server with multi-account support. \
+                 All tools accept an optional 'account' parameter to select \
+                 which X account to use (omit for default). \
+                 Available accounts: {}. \
+                 Tools: post_tweet, post_thread, upload_media, \
+                 delete_tweet, search_tweets, get_timeline, get_me, lookup_user, \
+                 get_followers, get_following, get_all_followers, get_all_following, \
+                 follow_user, unfollow_user, like_tweet, unlike_tweet, retweet, \
+                 unretweet, get_dm_events, send_dm, list_accounts.",
+                accounts_str.join(", ")
+            )
+        };
+
         Self {
-            client: Arc::new(XClient::new(config)),
-            cached_me: Arc::new(Mutex::new(None)),
+            clients,
+            default_account,
+            cached_me: Arc::new(Mutex::new(HashMap::new())),
+            instructions,
             tool_router: Self::tool_router(),
         }
+    }
+
+    #[tool(description = "List available X (Twitter) accounts and which is the default.")]
+    async fn list_accounts(
+        &self,
+        Parameters(_params): Parameters<AccountOnlyParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let cached = self.cached_me.lock().await;
+        let mut output = format!("Available accounts ({}):\n", self.clients.len());
+        for name in self.clients.keys() {
+            let default_marker = if name == &self.default_account {
+                " (default)"
+            } else {
+                ""
+            };
+            let username = cached
+                .get(name)
+                .map(|me| format!(" — @{}", me.username))
+                .unwrap_or_default();
+            output.push_str(&format!("  - {name}{default_marker}{username}\n"));
+        }
+        Ok(CallToolResult::success(vec![Content::text(output)]))
     }
 
     #[tool(
@@ -299,7 +414,8 @@ impl PostXServer {
             )]));
         }
 
-        let me = try_tool!(Self::require_me(self.ensure_me().await));
+        let (account, client, me) =
+            try_tool!(self.require_me_for(params.account.as_deref()).await);
 
         let media_attachments: Vec<MediaAttachment> = params
             .media
@@ -308,8 +424,7 @@ impl PostXServer {
             .map(Into::into)
             .collect();
 
-        let result = self
-            .client
+        let result = client
             .post_tweet(
                 &params.text,
                 &media_attachments,
@@ -319,7 +434,9 @@ impl PostXServer {
             )
             .await;
 
-        Ok(Self::ok_or_err(result.map(|r| Self::format_post_result(&r))))
+        Ok(Self::ok_or_err(
+            result.map(|r| Self::format_post_result(&r, &account)),
+        ))
     }
 
     #[tool(
@@ -342,7 +459,8 @@ impl PostXServer {
             ));
         }
 
-        let me = try_tool!(Self::require_me(self.ensure_me().await));
+        let (account, client, me) =
+            try_tool!(self.require_me_for(params.account.as_deref()).await);
 
         let tweets: Vec<(String, Vec<MediaAttachment>)> = params
             .tweets
@@ -359,12 +477,12 @@ impl PostXServer {
             .collect();
 
         let tweet_count = tweets.len();
-        let result = self.client.post_thread(&tweets, &me.username).await;
+        let result = client.post_thread(&tweets, &me.username).await;
 
         let mut output = String::new();
         if !result.posted.is_empty() {
             output.push_str(&format!(
-                "Posted {}/{} tweets:\n",
+                "Posted {}/{} tweets as @{account}:\n",
                 result.posted.len(),
                 tweet_count
             ));
@@ -393,14 +511,15 @@ impl PostXServer {
         &self,
         Parameters(params): Parameters<UploadMediaParams>,
     ) -> Result<CallToolResult, McpError> {
-        let result = self
-            .client
+        let (account, client) = try_tool!(self.require_account(params.account.as_deref()));
+
+        let result = client
             .upload_media(&params.path, params.alt_text.as_deref())
             .await;
 
         Ok(Self::ok_or_err(result.map(|r| {
             format!(
-                "Media uploaded!\nMedia ID: {}\nType: {}\nState: {}",
+                "Media uploaded (account: {account})!\nMedia ID: {}\nType: {}\nState: {}",
                 r.media_id, r.media_type, r.state
             )
         })))
@@ -409,15 +528,20 @@ impl PostXServer {
     #[tool(
         description = "Get the authenticated X (Twitter) user's profile (id, name, username). Useful for verifying credentials."
     )]
-    async fn get_me(&self) -> Result<CallToolResult, McpError> {
-        match self.client.get_me().await {
+    async fn get_me(
+        &self,
+        Parameters(params): Parameters<AccountOnlyParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let (name, client) = try_tool!(self.require_account(params.account.as_deref()));
+
+        match client.get_me().await {
             Ok(me) => {
                 {
                     let mut cached = self.cached_me.lock().await;
-                    *cached = Some(me.clone());
+                    cached.insert(name.to_string(), me.clone());
                 }
                 let text = format!(
-                    "Authenticated as:\n  Name: {}\n  Username: @{}\n  ID: {}",
+                    "Authenticated as (account: {name}):\n  Name: {}\n  Username: @{}\n  ID: {}",
                     me.name, me.username, me.id
                 );
                 Ok(CallToolResult::success(vec![Content::text(text)]))
@@ -433,12 +557,12 @@ impl PostXServer {
         &self,
         Parameters(params): Parameters<FollowsLookupParams>,
     ) -> Result<CallToolResult, McpError> {
-        let me = try_tool!(Self::require_me(self.ensure_me().await));
+        let (_account, client, me) =
+            try_tool!(self.require_me_for(params.account.as_deref()).await);
 
         let max_results = params.max_results.unwrap_or(20).clamp(1, 100);
 
-        let result = self
-            .client
+        let result = client
             .get_followers(&me.id, max_results, params.pagination_token.as_deref())
             .await;
 
@@ -454,12 +578,12 @@ impl PostXServer {
         &self,
         Parameters(params): Parameters<FollowsLookupParams>,
     ) -> Result<CallToolResult, McpError> {
-        let me = try_tool!(Self::require_me(self.ensure_me().await));
+        let (_account, client, me) =
+            try_tool!(self.require_me_for(params.account.as_deref()).await);
 
         let max_results = params.max_results.unwrap_or(20).clamp(1, 100);
 
-        let result = self
-            .client
+        let result = client
             .get_following(&me.id, max_results, params.pagination_token.as_deref())
             .await;
 
@@ -471,10 +595,14 @@ impl PostXServer {
     #[tool(
         description = "Get ALL accounts the authenticated user follows on X (Twitter). Auto-paginates to fetch every account. Returns usernames, display names, follower counts, and bios."
     )]
-    async fn get_all_following(&self) -> Result<CallToolResult, McpError> {
-        let me = try_tool!(Self::require_me(self.ensure_me().await));
+    async fn get_all_following(
+        &self,
+        Parameters(params): Parameters<AccountOnlyParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let (_account, client, me) =
+            try_tool!(self.require_me_for(params.account.as_deref()).await);
 
-        let result = self.client.get_all_following(&me.id).await;
+        let result = client.get_all_following(&me.id).await;
 
         Ok(Self::ok_or_err(
             result.map(|users| Self::format_all_follows(&users, "following")),
@@ -484,10 +612,14 @@ impl PostXServer {
     #[tool(
         description = "Get ALL followers of the authenticated user on X (Twitter). Auto-paginates to fetch every follower. Returns usernames, display names, follower counts, and bios."
     )]
-    async fn get_all_followers(&self) -> Result<CallToolResult, McpError> {
-        let me = try_tool!(Self::require_me(self.ensure_me().await));
+    async fn get_all_followers(
+        &self,
+        Parameters(params): Parameters<AccountOnlyParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let (_account, client, me) =
+            try_tool!(self.require_me_for(params.account.as_deref()).await);
 
-        let result = self.client.get_all_followers(&me.id).await;
+        let result = client.get_all_followers(&me.id).await;
 
         Ok(Self::ok_or_err(
             result.map(|users| Self::format_all_follows(&users, "followers")),
@@ -501,15 +633,16 @@ impl PostXServer {
         &self,
         Parameters(params): Parameters<LookupUserParams>,
     ) -> Result<CallToolResult, McpError> {
-        let me = try_tool!(Self::require_me(self.ensure_me().await));
+        let (_account, client, me) =
+            try_tool!(self.require_me_for(params.account.as_deref()).await);
 
-        let target_id = match self.client.resolve_user_id(&params.user).await {
+        let target_id = match client.resolve_user_id(&params.user).await {
             Ok(id) => id,
             Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
         };
 
         Ok(Self::ok_or_err(
-            self.client
+            client
                 .follow_user(&me.id, &target_id)
                 .await
                 .map(|following| format!("Now following user {}: {following}", params.user.trim())),
@@ -523,15 +656,16 @@ impl PostXServer {
         &self,
         Parameters(params): Parameters<LookupUserParams>,
     ) -> Result<CallToolResult, McpError> {
-        let me = try_tool!(Self::require_me(self.ensure_me().await));
+        let (_account, client, me) =
+            try_tool!(self.require_me_for(params.account.as_deref()).await);
 
-        let target_id = match self.client.resolve_user_id(&params.user).await {
+        let target_id = match client.resolve_user_id(&params.user).await {
             Ok(id) => id,
             Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
         };
 
         Ok(Self::ok_or_err(
-            self.client
+            client
                 .unfollow_user(&me.id, &target_id)
                 .await
                 .map(|following| {
@@ -547,6 +681,8 @@ impl PostXServer {
         &self,
         Parameters(params): Parameters<LookupUserParams>,
     ) -> Result<CallToolResult, McpError> {
+        let (_account, client) = try_tool!(self.require_account(params.account.as_deref()));
+
         let user = params
             .user
             .trim()
@@ -562,9 +698,9 @@ impl PostXServer {
         let is_id = user.chars().all(|c| c.is_ascii_digit());
 
         let result = if is_id {
-            self.client.lookup_user_by_id(user).await
+            client.lookup_user_by_id(user).await
         } else {
-            self.client.lookup_user_by_username(user).await
+            client.lookup_user_by_username(user).await
         };
 
         Ok(Self::ok_or_err(result.map(|p| Self::format_user_profile(&p))))
@@ -577,10 +713,11 @@ impl PostXServer {
     ) -> Result<CallToolResult, McpError> {
         let tweet_id = try_tool!(Self::require_tweet_id(&params.tweet_id));
 
-        let me = try_tool!(Self::require_me(self.ensure_me().await));
+        let (_account, client, me) =
+            try_tool!(self.require_me_for(params.account.as_deref()).await);
 
         Ok(Self::ok_or_err(
-            self.client
+            client
                 .like_tweet(&me.id, tweet_id)
                 .await
                 .map(|liked| format!("Tweet {tweet_id} liked: {liked}")),
@@ -594,10 +731,11 @@ impl PostXServer {
     ) -> Result<CallToolResult, McpError> {
         let tweet_id = try_tool!(Self::require_tweet_id(&params.tweet_id));
 
-        let me = try_tool!(Self::require_me(self.ensure_me().await));
+        let (_account, client, me) =
+            try_tool!(self.require_me_for(params.account.as_deref()).await);
 
         Ok(Self::ok_or_err(
-            self.client
+            client
                 .unlike_tweet(&me.id, tweet_id)
                 .await
                 .map(|liked| format!("Tweet {tweet_id} unliked (liked: {liked})")),
@@ -613,8 +751,10 @@ impl PostXServer {
     ) -> Result<CallToolResult, McpError> {
         let tweet_id = try_tool!(Self::require_tweet_id(&params.tweet_id));
 
+        let (_account, client) = try_tool!(self.require_account(params.account.as_deref()));
+
         Ok(Self::ok_or_err(
-            self.client
+            client
                 .delete_tweet(tweet_id)
                 .await
                 .map(|deleted| format!("Tweet {tweet_id} deleted: {deleted}")),
@@ -628,10 +768,11 @@ impl PostXServer {
     ) -> Result<CallToolResult, McpError> {
         let tweet_id = try_tool!(Self::require_tweet_id(&params.tweet_id));
 
-        let me = try_tool!(Self::require_me(self.ensure_me().await));
+        let (_account, client, me) =
+            try_tool!(self.require_me_for(params.account.as_deref()).await);
 
         Ok(Self::ok_or_err(
-            self.client
+            client
                 .retweet(&me.id, tweet_id)
                 .await
                 .map(|retweeted| format!("Tweet {tweet_id} retweeted: {retweeted}")),
@@ -645,10 +786,11 @@ impl PostXServer {
     ) -> Result<CallToolResult, McpError> {
         let tweet_id = try_tool!(Self::require_tweet_id(&params.tweet_id));
 
-        let me = try_tool!(Self::require_me(self.ensure_me().await));
+        let (_account, client, me) =
+            try_tool!(self.require_me_for(params.account.as_deref()).await);
 
         Ok(Self::ok_or_err(
-            self.client
+            client
                 .unretweet(&me.id, tweet_id)
                 .await
                 .map(|retweeted| format!("Tweet {tweet_id} unretweeted (retweeted: {retweeted})")),
@@ -669,10 +811,11 @@ impl PostXServer {
             )]));
         }
 
+        let (_account, client) = try_tool!(self.require_account(params.account.as_deref()));
+
         let max_results = params.max_results.unwrap_or(10).clamp(10, 100);
 
-        let result = self
-            .client
+        let result = client
             .search_recent_tweets(
                 query,
                 max_results,
@@ -693,12 +836,12 @@ impl PostXServer {
         &self,
         Parameters(params): Parameters<TimelineParams>,
     ) -> Result<CallToolResult, McpError> {
-        let me = try_tool!(Self::require_me(self.ensure_me().await));
+        let (_account, client, me) =
+            try_tool!(self.require_me_for(params.account.as_deref()).await);
 
         let max_results = params.max_results.unwrap_or(20).clamp(1, 100);
 
-        let result = self
-            .client
+        let result = client
             .get_timeline(
                 &me.id,
                 max_results,
@@ -719,10 +862,11 @@ impl PostXServer {
         &self,
         Parameters(params): Parameters<GetDmEventsParams>,
     ) -> Result<CallToolResult, McpError> {
+        let (_account, client) = try_tool!(self.require_account(params.account.as_deref()));
+
         let max_results = params.max_results.unwrap_or(20).clamp(1, 100);
 
-        let result = self
-            .client
+        let result = client
             .get_dm_events(max_results, params.pagination_token.as_deref())
             .await;
 
@@ -751,7 +895,9 @@ impl PostXServer {
             )]));
         }
 
-        let result = self.client.send_dm(conversation_id, text).await;
+        let (_account, client) = try_tool!(self.require_account(params.account.as_deref()));
+
+        let result = client.send_dm(conversation_id, text).await;
 
         Ok(Self::ok_or_err(result.map(|r| {
             format!(
@@ -770,12 +916,6 @@ impl ServerHandler for PostXServer {
                 "mcp-server-post-x",
                 env!("CARGO_PKG_VERSION"),
             ))
-            .with_instructions(
-                "X (Twitter) server. Tools: post_tweet, post_thread, upload_media, \
-                 delete_tweet, search_tweets, get_timeline, get_me, lookup_user, \
-                 get_followers, get_following, get_all_followers, get_all_following, \
-                 follow_user, unfollow_user, like_tweet, unlike_tweet, retweet, \
-                 unretweet, get_dm_events, send_dm.",
-            )
+            .with_instructions(&self.instructions)
     }
 }
