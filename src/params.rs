@@ -158,3 +158,13 @@ pub struct FollowsLookupParams {
     #[schemars(description = "Pagination token from a previous response to get the next page")]
     pub pagination_token: Option<String>,
 }
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct GetAllFollowsParams {
+    #[schemars(description = "Account name to use (omit for default account)")]
+    pub account: Option<String>,
+    #[schemars(
+        description = "Safety cap on number of users returned (1-10000, default 5000). Prevents huge responses from accounts with tens of thousands of followers."
+    )]
+    pub max_users: Option<u32>,
+}

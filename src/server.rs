@@ -12,9 +12,9 @@ use crate::api::{
     UserSummary, XClient,
 };
 use crate::params::{
-    AccountOnlyParams, FollowsLookupParams, GetDmEventsParams, LookupUserParams,
-    PostThreadParams, PostTweetParams, SearchTweetsParams, SendDmParams, TimelineParams,
-    TweetIdParams, UploadMediaParams,
+    AccountOnlyParams, FollowsLookupParams, GetAllFollowsParams, GetDmEventsParams,
+    LookupUserParams, PostThreadParams, PostTweetParams, SearchTweetsParams, SendDmParams,
+    TimelineParams, TweetIdParams, UploadMediaParams,
 };
 use reqwest::Client;
 use rmcp::{
@@ -79,6 +79,7 @@ impl PostXServer {
         Ok((name.to_string(), me))
     }
 
+    #[allow(clippy::type_complexity)]
     fn require_me_for(
         &self,
         account: Option<&str>,
@@ -153,15 +154,13 @@ impl PostXServer {
                 user.name,
                 followers_str,
             ));
-            if let Some(ref desc) = user.description {
-                if !desc.is_empty() {
-                    let truncated = if desc.len() > 100 {
-                        format!("{}...", Self::truncate_str(desc, 97))
-                    } else {
-                        desc.clone()
-                    };
-                    output.push_str(&format!("     {truncated}\n"));
-                }
+            if let Some(desc) = user.description.as_ref().filter(|d| !d.is_empty()) {
+                let truncated = if desc.len() > 100 {
+                    format!("{}...", Self::truncate_str(desc, 97))
+                } else {
+                    desc.clone()
+                };
+                output.push_str(&format!("     {truncated}\n"));
             }
         }
 
@@ -188,15 +187,13 @@ impl PostXServer {
                 user.name,
                 followers_str,
             ));
-            if let Some(ref desc) = user.description {
-                if !desc.is_empty() {
-                    let truncated = if desc.len() > 100 {
-                        format!("{}...", Self::truncate_str(desc, 97))
-                    } else {
-                        desc.clone()
-                    };
-                    output.push_str(&format!("     {truncated}\n"));
-                }
+            if let Some(desc) = user.description.as_ref().filter(|d| !d.is_empty()) {
+                let truncated = if desc.len() > 100 {
+                    format!("{}...", Self::truncate_str(desc, 97))
+                } else {
+                    desc.clone()
+                };
+                output.push_str(&format!("     {truncated}\n"));
             }
         }
 
@@ -207,20 +204,14 @@ impl PostXServer {
         let mut output = format!("@{} ({})\n", p.username, p.name);
         output.push_str(&format!("  ID: {}\n", p.id));
 
-        if let Some(desc) = &p.description {
-            if !desc.is_empty() {
-                output.push_str(&format!("  Bio: {desc}\n"));
-            }
+        if let Some(desc) = p.description.as_ref().filter(|d| !d.is_empty()) {
+            output.push_str(&format!("  Bio: {desc}\n"));
         }
-        if let Some(loc) = &p.location {
-            if !loc.is_empty() {
-                output.push_str(&format!("  Location: {loc}\n"));
-            }
+        if let Some(loc) = p.location.as_ref().filter(|l| !l.is_empty()) {
+            output.push_str(&format!("  Location: {loc}\n"));
         }
-        if let Some(url) = &p.url {
-            if !url.is_empty() {
-                output.push_str(&format!("  URL: {url}\n"));
-            }
+        if let Some(url) = p.url.as_ref().filter(|u| !u.is_empty()) {
+            output.push_str(&format!("  URL: {url}\n"));
         }
         if let Some(metrics) = &p.public_metrics {
             output.push_str(&format!(
@@ -593,16 +584,17 @@ impl PostXServer {
     }
 
     #[tool(
-        description = "Get ALL accounts the authenticated user follows on X (Twitter). Auto-paginates to fetch every account. Returns usernames, display names, follower counts, and bios."
+        description = "Get ALL accounts the authenticated user follows on X (Twitter). Auto-paginates. Has a safety cap (default 5000, max 10000) to avoid massive responses. Use get_following for paginated access without cap."
     )]
     async fn get_all_following(
         &self,
-        Parameters(params): Parameters<AccountOnlyParams>,
+        Parameters(params): Parameters<GetAllFollowsParams>,
     ) -> Result<CallToolResult, McpError> {
         let (_account, client, me) =
             try_tool!(self.require_me_for(params.account.as_deref()).await);
 
-        let result = client.get_all_following(&me.id).await;
+        let max_users = params.max_users.unwrap_or(5000).clamp(1, 10000);
+        let result = client.get_all_following(&me.id, max_users).await;
 
         Ok(Self::ok_or_err(
             result.map(|users| Self::format_all_follows(&users, "following")),
@@ -610,16 +602,17 @@ impl PostXServer {
     }
 
     #[tool(
-        description = "Get ALL followers of the authenticated user on X (Twitter). Auto-paginates to fetch every follower. Returns usernames, display names, follower counts, and bios."
+        description = "Get ALL followers of the authenticated user on X (Twitter). Auto-paginates. Has a safety cap (default 5000, max 10000) to avoid massive responses. Use get_followers for paginated access without cap."
     )]
     async fn get_all_followers(
         &self,
-        Parameters(params): Parameters<AccountOnlyParams>,
+        Parameters(params): Parameters<GetAllFollowsParams>,
     ) -> Result<CallToolResult, McpError> {
         let (_account, client, me) =
             try_tool!(self.require_me_for(params.account.as_deref()).await);
 
-        let result = client.get_all_followers(&me.id).await;
+        let max_users = params.max_users.unwrap_or(5000).clamp(1, 10000);
+        let result = client.get_all_followers(&me.id, max_users).await;
 
         Ok(Self::ok_or_err(
             result.map(|users| Self::format_all_follows(&users, "followers")),
@@ -917,5 +910,38 @@ impl ServerHandler for PostXServer {
                 env!("CARGO_PKG_VERSION"),
             ))
             .with_instructions(&self.instructions)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_tweet_id_from_url_variants() {
+        assert_eq!(
+            PostXServer::extract_tweet_id("https://x.com/elonmusk/status/1234567890"),
+            "1234567890"
+        );
+        assert_eq!(
+            PostXServer::extract_tweet_id("https://twitter.com/user/status/9876543210?s=20"),
+            "9876543210"
+        );
+        assert_eq!(
+            PostXServer::extract_tweet_id("https://x.com/user/status/555666777#likes"),
+            "555666777"
+        );
+        assert_eq!(PostXServer::extract_tweet_id("1234567890"), "1234567890");
+        assert_eq!(PostXServer::extract_tweet_id("   42   "), "42");
+        assert_eq!(PostXServer::extract_tweet_id(""), "");
+    }
+
+    #[test]
+    fn truncate_str_respects_char_boundaries() {
+        let s = "héllo world — this is a test";
+        let t = PostXServer::truncate_str(s, 10);
+        assert!(t.len() <= 10);
+        // Should be valid UTF-8
+        assert!(std::str::from_utf8(t.as_bytes()).is_ok());
     }
 }

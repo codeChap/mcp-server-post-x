@@ -44,7 +44,22 @@ Produces `target/release/post-x` (optimized with LTO, stripped).
 
 ### 2. Configure credentials
 
-Create the config file:
+The server looks for the config at the first of:
+- `$XDG_CONFIG_HOME/mcp-server-post-x/config.toml`
+- `~/.config/mcp-server-post-x/config.toml`
+
+You can also run **without any config file** by providing credentials via environment variables (great for containers/CI):
+
+```bash
+export POST_X_API_KEY=...
+export POST_X_API_KEY_SECRET=...
+export POST_X_ACCESS_TOKEN=...
+export POST_X_ACCESS_TOKEN_SECRET=...
+# Optional:
+# export POST_X_ACCOUNT_NAME=myaccount
+```
+
+Create the config file (classic approach):
 
 ```bash
 mkdir -p ~/.config/mcp-server-post-x
@@ -201,8 +216,9 @@ Returns a `media_id` to use with `post_tweet`'s `media_ids` param.
 | Param | Type | Required | Description |
 |-------|------|----------|-------------|
 | `account` | string | no | Account to use (omit for default) |
+| `max_users` | integer | no | Safety cap (default 5000, max 10000). Prevents huge responses for high-follower accounts. |
 
-Auto-paginates through all results (100 per page) and returns the complete list in a single response. Includes a 200ms delay between pages to respect rate limits.
+Auto-paginates through results (100 per page) with a 200ms delay between pages. For accounts with tens of thousands of followers, prefer the paginated `get_followers` / `get_following` tools instead.
 
 ### get_dm_events
 
@@ -230,18 +246,22 @@ Returns your user ID, display name, and @username.
 
 ## Adding Additional Accounts
 
-To add another X account to an existing app without a separate developer account, use the included OAuth authorization script:
+To add another X account to an existing app (without a separate developer account), use the included OAuth authorization script:
 
 ```bash
+export X_API_KEY="your-app-api-key"
+export X_API_KEY_SECRET="your-app-api-key-secret"
 ./oauth-authorize.sh
 ```
+
+**Important:** The script no longer contains any hardcoded credentials. You must provide your own app's Consumer Keys via the two environment variables shown above.
 
 This runs the 3-legged OAuth 1.0a PIN-based flow:
 1. Opens a URL where the new account authorizes your app
 2. You paste the PIN back into the terminal
 3. It outputs the `[accounts.username]` config block to add to your `config.toml`
 
-All accounts share the same app and billing credits.
+All accounts you authorize share the same X App (and its rate limits + billing). This is the normal pattern for multi-account usage.
 
 ## Getting Credentials
 
@@ -265,6 +285,10 @@ The server validates credentials at startup. If you get persistent 401 errors, r
 cargo build              # debug build
 cargo run                # run in dev mode
 RUST_LOG=debug cargo run # debug logging (credentials are redacted)
+
+cargo test               # run unit tests
+cargo clippy -- -D warnings   # strict lint check (must pass)
+cargo build --release    # optimized binary
 ```
 
 ## Technical Details
@@ -278,6 +302,8 @@ RUST_LOG=debug cargo run # debug logging (credentials are redacted)
 - **Thread posting:** 500ms delay between tweets, chained via `in_reply_to_tweet_id`
 - **Retry logic:** Automatic retry with exponential backoff on 503 errors
 - **Rate limits:** 429 responses include reset timestamp in error message (no auto-retry — the caller decides)
+- **Safety:** `get_all_followers` / `get_all_following` are capped at 10k users by default to avoid destroying LLM context windows
+- **Rust edition:** 2021 (broad compatibility)
 
 ## Project Structure
 

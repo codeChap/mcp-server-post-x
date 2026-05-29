@@ -1,10 +1,48 @@
 #!/usr/bin/env bash
 # 3-legged OAuth 1.0a PIN-based flow for X (Twitter)
 # Authorizes a user account against an existing app.
+#
+# IMPORTANT SECURITY NOTE:
+#   This script lets you obtain access tokens for additional X accounts
+#   against an X App you already created at https://developer.x.com/
+#
+#   You MUST supply your own app's API Key + Secret via environment variables.
+#   Never commit real keys. The previous version of this script contained
+#   hardcoded keys belonging to the maintainer — those have been removed.
+#
+# Usage:
+#   export X_API_KEY="your-api-key"
+#   export X_API_KEY_SECRET="your-api-key-secret"
+#   ./oauth-authorize.sh
+#
+# After running, paste the printed [accounts.xxx] block into your config.toml.
 set -euo pipefail
 
-API_KEY="AL2pOHlmB6HR2CmEnFYE1Hs3Y"
-API_KEY_SECRET="rRsIXAdkwJDJv6mDFsYghdxHBuVWN51jzKTqDqBU5aSPqh5az1"
+API_KEY="${X_API_KEY:-}"
+API_KEY_SECRET="${X_API_KEY_SECRET:-}"
+
+if [[ -z "$API_KEY" || -z "$API_KEY_SECRET" ]]; then
+    cat <<'EOF' >&2
+ERROR: X_API_KEY and X_API_KEY_SECRET environment variables are required.
+
+This script no longer contains hardcoded credentials.
+
+To use it:
+
+  1. Go to https://developer.x.com/ and open your App's "Keys and tokens"
+  2. Copy the "API Key" and "API Key Secret" (Consumer Keys)
+  3. Run:
+
+       export X_API_KEY="YOUR_API_KEY_HERE"
+       export X_API_KEY_SECRET="YOUR_API_KEY_SECRET_HERE"
+       ./oauth-authorize.sh
+
+  All accounts you authorize will share the same X App (and its rate limits /
+  billing). This is the normal and supported pattern for multi-account use.
+
+EOF
+    exit 1
+fi
 
 REQUEST_TOKEN_URL="https://api.twitter.com/oauth/request_token"
 AUTHORIZE_URL="https://api.twitter.com/oauth/authorize"
@@ -53,7 +91,7 @@ fi
 # --- Step 2: user authorizes ---
 
 echo ""
-echo "=== Step 2: Open this URL in a browser where you're logged in as @securechap:"
+echo "=== Step 2: Open this URL in a browser where you're logged in as the account you want to authorize:"
 echo ""
 echo "  ${AUTHORIZE_URL}?oauth_token=${OAUTH_TOKEN}"
 echo ""
@@ -83,7 +121,7 @@ if echo "$RESPONSE" | grep -q "oauth_token="; then
     echo ""
     echo "=== Success! Authorized as @${SCREEN_NAME}"
     echo ""
-    echo "Add this to ~/.config/mcp-server-post-x/config.toml:"
+    echo "Add this block to your config file (usually ~/.config/mcp-server-post-x/config.toml):"
     echo ""
     echo "[accounts.${SCREEN_NAME}]"
     echo "api_key = \"${API_KEY}\""

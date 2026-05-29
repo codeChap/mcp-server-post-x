@@ -50,6 +50,7 @@ type HmacSha1 = Hmac<sha1::Sha1>;
 
 // --- Config ---
 
+#[allow(clippy::type_complexity)]
 const ACCOUNT_CONFIG_FIELDS: &[(&str, fn(&AccountConfig) -> &str)] = &[
     ("api_key", |c| &c.api_key),
     ("api_key_secret", |c| &c.api_key_secret),
@@ -87,6 +88,7 @@ impl AccountConfig {
     }
 }
 
+#[derive(Debug)]
 pub struct AppConfig {
     pub accounts: HashMap<String, AccountConfig>,
     pub default_account: String,
@@ -169,6 +171,7 @@ impl fmt::Display for MediaType {
     }
 }
 
+#[derive(Clone)]
 struct MediaInfo {
     mime: String,
     media_type: MediaType,
@@ -278,6 +281,7 @@ struct FollowsResponse {
 }
 
 #[derive(Deserialize)]
+#[allow(dead_code)]
 pub struct UserSummary {
     pub id: String,
     pub name: String,
@@ -294,6 +298,7 @@ pub struct PublicMetrics {
 }
 
 #[derive(Deserialize)]
+#[allow(dead_code)]
 pub struct FollowsMeta {
     pub result_count: Option<u32>,
     pub next_token: Option<String>,
@@ -379,6 +384,7 @@ struct SendDmData {
     dm_event_id: String,
 }
 
+#[allow(dead_code)]
 pub struct DmEventResult {
     pub id: String,
     pub event_type: String,
@@ -711,13 +717,11 @@ impl XClient {
                 ids.push(result.media_id);
             }
             Some(ids)
-        } else if let Some(ids) = media_ids {
-            Some(ids.to_vec())
         } else {
-            None
+            media_ids.map(|ids| ids.to_vec())
         };
 
-        let text = text.replace('\u{2014}', "-").replace('\u{2013}', "-");
+        let text = text.replace(['\u{2014}', '\u{2013}'], "-");
         let body = TweetBody {
             text,
             media: resolved_ids.map(|ids| TweetMedia { media_ids: ids }),
@@ -815,17 +819,29 @@ impl XClient {
         self.get_follows(&url, max_results, pagination_token).await
     }
 
-    pub async fn get_all_followers(&self, user_id: &str) -> Result<Vec<UserSummary>, String> {
+    pub async fn get_all_followers(
+        &self,
+        user_id: &str,
+        max_users: u32,
+    ) -> Result<Vec<UserSummary>, String> {
         let url = format!("https://api.x.com/2/users/{user_id}/followers");
-        self.get_all_follows(&url).await
+        self.get_all_follows(&url, max_users).await
     }
 
-    pub async fn get_all_following(&self, user_id: &str) -> Result<Vec<UserSummary>, String> {
+    pub async fn get_all_following(
+        &self,
+        user_id: &str,
+        max_users: u32,
+    ) -> Result<Vec<UserSummary>, String> {
         let url = format!("https://api.x.com/2/users/{user_id}/following");
-        self.get_all_follows(&url).await
+        self.get_all_follows(&url, max_users).await
     }
 
-    async fn get_all_follows(&self, base_url: &str) -> Result<Vec<UserSummary>, String> {
+    async fn get_all_follows(
+        &self,
+        base_url: &str,
+        max_users: u32,
+    ) -> Result<Vec<UserSummary>, String> {
         let mut all_users = Vec::new();
         let mut next_token: Option<String> = None;
         let mut page = 0u32;
@@ -833,7 +849,7 @@ impl XClient {
         loop {
             page += 1;
             tracing::info!(
-                "get_all_follows: fetching page {page}, collected {} so far",
+                "get_all_follows: fetching page {page}, collected {} so far (cap {max_users})",
                 all_users.len()
             );
             let result = self
@@ -844,6 +860,14 @@ impl XClient {
                 result.users.len()
             );
             all_users.extend(result.users);
+
+            if all_users.len() >= max_users as usize {
+                all_users.truncate(max_users as usize);
+                tracing::info!(
+                    "get_all_follows: reached safety cap of {max_users} users, truncating"
+                );
+                break;
+            }
 
             match result.next_token {
                 Some(token) => next_token = Some(token),
@@ -1410,7 +1434,8 @@ impl XClient {
 
         let nonce = {
             let mut bytes = [0u8; 16];
-            rand::thread_rng().fill(&mut bytes);
+            // rand 0.9 uses rand::rng() for the thread-local RNG
+            rand::rng().fill(&mut bytes);
             hex::encode(bytes)
         };
 
@@ -1551,13 +1576,77 @@ fn validate_media_combination(infos: &[MediaInfo]) -> Result<(), String> {
     Ok(())
 }
 
-/// Hex encoding for nonce — avoids adding a full crate dependency.
-mod hex {
-    pub fn encode(bytes: impl AsRef<[u8]>) -> String {
-        bytes
-            .as_ref()
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect()
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn config_single_account_auto_default() {
+        let toml = r#"
+[accounts.testuser]
+api_key = "k1"
+api_key_secret = "s1"
+access_token = "t1"
+access_token_secret = "ts1"
+"#;
+        let cfg = AppConfig::from_toml(toml).unwrap();
+        assert_eq!(cfg.default_account, "testuser");
+        assert_eq!(cfg.accounts.len(), 1);
+    }
+
+    #[test]
+    fn config_multiple_accounts_requires_default() {
+        let toml = r#"
+[accounts.one]
+api_key = "k1"
+api_key_secret = "s1"
+access_token = "t1"
+access_token_secret = "ts1"
+
+[accounts.two]
+api_key = "k2"
+api_key_secret = "s2"
+access_token = "t2"
+access_token_secret = "ts2"
+"#;
+        let err = AppConfig::from_toml(toml).unwrap_err();
+        assert!(err.contains("no default_account specified"));
+    }
+
+    #[test]
+    fn config_bad_default_account_is_rejected() {
+        let toml = r#"
+default_account = "ghost"
+
+[accounts.real]
+api_key = "k"
+api_key_secret = "s"
+access_token = "t"
+access_token_secret = "ts"
+"#;
+        let err = AppConfig::from_toml(toml).unwrap_err();
+        assert!(err.contains("not found in [accounts]"));
+    }
+
+    #[test]
+    fn media_validation_rejects_mixing_video() {
+        let infos = vec![
+            MediaInfo { mime: "image/jpeg".into(), media_type: MediaType::Image, max_size: 5<<20 },
+            MediaInfo { mime: "video/mp4".into(), media_type: MediaType::Video, max_size: 100<<20 },
+        ];
+        let err = validate_media_combination(&infos).unwrap_err();
+        assert!(err.contains("Videos cannot be mixed"));
+    }
+
+    #[test]
+    fn media_validation_rejects_more_than_four() {
+        let infos = vec![
+            MediaInfo { mime: "image/jpeg".into(), media_type: MediaType::Image, max_size: 5<<20 };
+            5
+        ];
+        let err = validate_media_combination(&infos).unwrap_err();
+        assert!(err.contains("Maximum 4"));
     }
 }
+
+
