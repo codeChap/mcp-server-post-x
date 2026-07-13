@@ -168,3 +168,61 @@ pub struct GetAllFollowsParams {
     )]
     pub max_users: Option<u32>,
 }
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct GetBookmarksParams {
+    #[schemars(description = "Account name to use (omit for default account)")]
+    pub account: Option<String>,
+    #[schemars(description = "Maximum results to return (1-100, default 20)")]
+    pub max_results: Option<u32>,
+    #[schemars(description = "Pagination token from a previous response to get the next page")]
+    pub pagination_token: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct GetTrendsParams {
+    #[schemars(description = "Account name to use (omit for default account). Trends use the app credentials/rate limits associated with the chosen account.")]
+    pub account: Option<String>,
+    #[schemars(
+        description = "WOEID (Where On Earth ID) for the location. Omit or use 1 for Worldwide. Common values: 23424977 (United States), 23424975 (United Kingdom), 23424856 (Japan), 2459115 (New York), 44418 (London), 1118370 (Tokyo)"
+    )]
+    pub woeid: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct UpdateProfileParams {
+    #[schemars(description = "Account name to use (omit for default account)")]
+    pub account: Option<String>,
+    #[schemars(
+        description = "New bio/description text (max 160 characters). Pass an empty string to clear the bio."
+    )]
+    pub description: Option<String>,
+    #[schemars(description = "New display name (1-50 characters).")]
+    pub name: Option<String>,
+    #[schemars(
+        description = "New location text (max 30 characters). Pass an empty string to clear it."
+    )]
+    pub location: Option<String>,
+    #[schemars(
+        description = "New website URL shown on the profile (max 100 characters). Pass an empty string to clear it."
+    )]
+    pub url: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct UpdateProfileBannerParams {
+    #[schemars(description = "Account name to use (omit for default account)")]
+    pub account: Option<String>,
+    #[schemars(
+        description = "Local file path to the banner image file. Supported formats: JPEG, PNG, WebP. Max size 5MB. X recommends 1500x500 pixels for best results."
+    )]
+    pub path: String,
+    #[schemars(description = "Width of the image (pixels) for cropping/positioning.")]
+    pub width: Option<u32>,
+    #[schemars(description = "Height of the image (pixels) for cropping/positioning.")]
+    pub height: Option<u32>,
+    #[schemars(description = "Offset from the left edge (in pixels) where the crop should start.")]
+    pub offset_left: Option<u32>,
+    #[schemars(description = "Offset from the top edge (in pixels) where the crop should start.")]
+    pub offset_top: Option<u32>,
+}

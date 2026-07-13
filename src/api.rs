@@ -16,6 +16,8 @@ const TWEETS_URL: &str = "https://api.x.com/2/tweets";
 const MEDIA_UPLOAD_URL: &str = "https://upload.twitter.com/1.1/media/upload.json";
 const MEDIA_METADATA_URL: &str = "https://upload.twitter.com/1.1/media/metadata/create.json";
 const ME_URL: &str = "https://api.x.com/2/users/me";
+const UPDATE_BANNER_URL: &str = "https://api.twitter.com/1.1/account/update_profile_banner.json";
+const UPDATE_PROFILE_URL: &str = "https://api.twitter.com/1.1/account/update_profile.json";
 
 const MAX_THREAD_LENGTH: usize = 25;
 const MAX_RETRIES: u32 = 3;
@@ -267,6 +269,18 @@ pub struct PostResult {
     pub url: String,
 }
 
+/// Minimal view of the v1.1 user object returned by `account/update_profile`.
+/// All fields optional so a 200 with an unexpected shape still confirms success.
+#[derive(Debug, Default, Deserialize)]
+pub struct UpdatedProfile {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub location: Option<String>,
+}
+
 pub struct ThreadResult {
     pub posted: Vec<PostResult>,
     pub error: Option<String>,
@@ -342,7 +356,7 @@ struct BoolResponse {
 
 #[derive(Deserialize)]
 struct BoolData {
-    #[serde(alias = "liked", alias = "deleted", alias = "retweeted")]
+    #[serde(alias = "liked", alias = "deleted", alias = "retweeted", alias = "bookmarked")]
     result: bool,
 }
 
@@ -402,6 +416,31 @@ pub struct DmEventsResult {
 pub struct SendDmResult {
     pub conversation_id: String,
     pub event_id: String,
+}
+
+// --- Trends types ---
+
+#[derive(Deserialize)]
+struct TrendsResponse {
+    data: Option<Vec<TrendItem>>,
+}
+
+#[derive(Deserialize)]
+struct TrendItem {
+    #[serde(rename = "trend_name", alias = "name")]
+    name: String,
+    #[serde(rename = "tweet_count", alias = "tweet_volume")]
+    tweet_count: Option<u64>,
+}
+
+pub struct Trend {
+    pub name: String,
+    pub tweet_count: Option<u64>,
+}
+
+pub struct TrendsResult {
+    pub trends: Vec<Trend>,
+    pub woeid: u64,
 }
 
 // --- Search/tweet list types ---
@@ -664,6 +703,186 @@ impl XClient {
         })
     }
 
+    /// Update the user's profile banner (header image) using the legacy v1.1 endpoint.
+    /// The `banner` value is base64-encoded image data and is deliberately excluded from the OAuth signature
+    /// (per the same pattern used for media uploads, as the param is large binary-derived data).
+    pub async fn update_profile_banner(
+        &self,
+        path: &str,
+        width: Option<u32>,
+        height: Option<u32>,
+        offset_left: Option<u32>,
+        offset_top: Option<u32>,
+    ) -> Result<(), String> {
+        let file_path = Path::new(path);
+        if !file_path.exists() {
+            return Err(format!("File not found: {path}"));
+        }
+
+        let metadata =
+            std::fs::metadata(file_path).map_err(|e| format!("Cannot read file metadata: {e}"))?;
+        let file_size = metadata.len();
+
+        if file_size > 5 * 1024 * 1024 {
+            return Err(format!(
+                "File too large: {} bytes (max 5MB for profile banner)",
+                file_size
+            ));
+        }
+
+        let info = media_info_from_path(file_path)?;
+
+        // Banner must be static image; no GIF (animated) or video
+        if info.media_type != MediaType::Image {
+            return Err(
+                "Profile banner must be a static image (JPEG, PNG, or WebP only). Animated GIFs and videos are not supported."
+                    .into(),
+            );
+        }
+
+        let file_bytes =
+            std::fs::read(file_path).map_err(|e| format!("Failed to read file: {e}"))?;
+        let banner_b64 = BASE64.encode(&file_bytes);
+
+        // Crop/position params for signing (banner itself must be excluded from signature)
+        let mut sign_params = BTreeMap::new();
+        if let Some(w) = width {
+            sign_params.insert("width".to_string(), w.to_string());
+        }
+        if let Some(h) = height {
+            sign_params.insert("height".to_string(), h.to_string());
+        }
+        if let Some(l) = offset_left {
+            sign_params.insert("offset_left".to_string(), l.to_string());
+        }
+        if let Some(t) = offset_top {
+            sign_params.insert("offset_top".to_string(), t.to_string());
+        }
+
+        // Body includes the (large) banner + any crop params
+        let mut body_params = sign_params.clone();
+        body_params.insert("banner".to_string(), banner_b64);
+
+        let resp = self
+            .retry_503(|| {
+                let auth = self.oauth_header("POST", UPDATE_BANNER_URL, &sign_params);
+                self.http
+                    .post(UPDATE_BANNER_URL)
+                    .header("Authorization", auth)
+                    .form(&body_params)
+            })
+            .await?;
+
+        // Custom error mapping for this legacy endpoint (as requested)
+        self.check_auth_error(&resp);
+        let status = resp.status();
+        if status.as_u16() == 429 {
+            let reset = self.rate_limit_reset(&resp);
+            return Err(format!("Rate limited (429). {reset}Try again later."));
+        }
+        if status.as_u16() == 401 {
+            return Err(
+                "Authentication failed (401) updating profile banner. Your OAuth credentials may be revoked or invalid. Regenerate them at https://developer.x.com/".into(),
+            );
+        }
+        if status.as_u16() == 403 {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!(
+                "Forbidden (403) updating profile banner. This is a legacy v1.1 account endpoint (update_profile_banner) and frequently requires a higher/paid X API access tier that enables full v1.1 endpoints. Confirm your developer app has the necessary permissions and tier. Response body: {body}"
+            ));
+        }
+        if status.as_u16() == 400 {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!(
+                "Bad request (400) updating profile banner. Verify the image is a valid static JPEG/PNG/WebP (X recommends 1500x500) and that any crop/offset params are within bounds. Response body: {body}"
+            ));
+        }
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!("X API error ({status}) updating profile banner: {body}"));
+        }
+
+        // 200/201 success with (usually) empty body
+        Ok(())
+    }
+
+    /// Update the authenticated user's profile text fields (bio/description, display
+    /// name, location, website URL) via the legacy v1.1 `account/update_profile`
+    /// endpoint. Only the provided fields are sent; an empty string clears a field.
+    /// Unlike the banner endpoint, every form param here participates in the OAuth
+    /// signature (they are small text values), so the same map is used for both.
+    pub async fn update_profile(
+        &self,
+        name: Option<&str>,
+        description: Option<&str>,
+        location: Option<&str>,
+        url: Option<&str>,
+    ) -> Result<UpdatedProfile, String> {
+        let mut params = BTreeMap::new();
+        if let Some(v) = name {
+            params.insert("name".to_string(), v.to_string());
+        }
+        if let Some(v) = description {
+            params.insert("description".to_string(), v.to_string());
+        }
+        if let Some(v) = location {
+            params.insert("location".to_string(), v.to_string());
+        }
+        if let Some(v) = url {
+            params.insert("url".to_string(), v.to_string());
+        }
+
+        if params.is_empty() {
+            return Err("No profile fields provided to update.".into());
+        }
+
+        // Skip the (large) most-recent-status payload in the returned user object.
+        params.insert("skip_status".to_string(), "true".to_string());
+
+        let resp = self
+            .retry_503(|| {
+                let auth = self.oauth_header("POST", UPDATE_PROFILE_URL, &params);
+                self.http
+                    .post(UPDATE_PROFILE_URL)
+                    .header("Authorization", auth)
+                    .form(&params)
+            })
+            .await?;
+
+        // Custom error mapping for this legacy v1.1 endpoint.
+        self.check_auth_error(&resp);
+        let status = resp.status();
+        if status.as_u16() == 429 {
+            let reset = self.rate_limit_reset(&resp);
+            return Err(format!("Rate limited (429). {reset}Try again later."));
+        }
+        if status.as_u16() == 401 {
+            return Err(
+                "Authentication failed (401) updating profile. Your OAuth credentials may be revoked or invalid, or the app lacks Read+Write permission. Regenerate them at https://developer.x.com/".into(),
+            );
+        }
+        if status.as_u16() == 403 {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!(
+                "Forbidden (403) updating profile. This is a legacy v1.1 account endpoint (update_profile) and frequently requires a higher/paid X API access tier plus Read+Write app permissions. Confirm your developer app's permissions and tier. Response body: {body}"
+            ));
+        }
+        if status.as_u16() == 400 {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!(
+                "Bad request (400) updating profile. Check field length limits (name <=50, description <=160, location <=30, url <=100 characters) and that the URL is valid. Response body: {body}"
+            ));
+        }
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!("X API error ({status}) updating profile: {body}"));
+        }
+
+        // 200 returns the updated user object; parse best-effort for confirmation.
+        let updated = resp.json::<UpdatedProfile>().await.unwrap_or_default();
+        Ok(updated)
+    }
+
     // --- Tweet posting ---
 
     pub async fn post_tweet(
@@ -721,9 +940,8 @@ impl XClient {
             media_ids.map(|ids| ids.to_vec())
         };
 
-        let text = text.replace(['\u{2014}', '\u{2013}'], "-");
         let body = TweetBody {
-            text,
+            text: normalize_tweet_text(text),
             media: resolved_ids.map(|ids| TweetMedia { media_ids: ids }),
             reply: reply_to.map(|id| TweetReply {
                 in_reply_to_tweet_id: id.to_string(),
@@ -1085,6 +1303,61 @@ impl XClient {
             conversation_id: response.data.dm_conversation_id,
             event_id: response.data.dm_event_id,
         })
+    }
+
+    // --- Bookmarks ---
+
+    pub async fn get_bookmarks(
+        &self,
+        user_id: &str,
+        max_results: u32,
+        pagination_token: Option<&str>,
+    ) -> Result<SearchResult, String> {
+        let base_url = format!("https://api.x.com/2/users/{user_id}/bookmarks");
+
+        let mut params = tweet_list_params(max_results);
+        if let Some(token) = pagination_token {
+            params.insert("pagination_token".to_string(), token.to_string());
+        }
+
+        let response: TweetListResponse = self.get_json(&base_url, &params).await?;
+        Ok(Self::map_tweet_list(response))
+    }
+
+    pub async fn bookmark_tweet(&self, user_id: &str, tweet_id: &str) -> Result<bool, String> {
+        let url = format!("https://api.x.com/2/users/{user_id}/bookmarks");
+        self.post_bool(&url, &serde_json::json!({ "tweet_id": tweet_id })).await
+    }
+
+    pub async fn unbookmark_tweet(&self, user_id: &str, tweet_id: &str) -> Result<bool, String> {
+        let url = format!("https://api.x.com/2/users/{user_id}/bookmarks/{tweet_id}");
+        self.delete_bool(&url).await
+    }
+
+    // --- Trends ---
+
+    pub async fn get_trends(&self, woeid: u64) -> Result<TrendsResult, String> {
+        let base_url = format!("https://api.x.com/2/trends/by/woeid/{woeid}");
+
+        let mut params = BTreeMap::new();
+        params.insert(
+            "trend.fields".to_string(),
+            "trend_name,tweet_count".to_string(),
+        );
+
+        let response: TrendsResponse = self.get_json(&base_url, &params).await?;
+
+        let trends = response
+            .data
+            .unwrap_or_default()
+            .into_iter()
+            .map(|t| Trend {
+                name: t.name,
+                tweet_count: t.tweet_count,
+            })
+            .collect();
+
+        Ok(TrendsResult { trends, woeid })
     }
 
     // --- Search ---
@@ -1551,6 +1824,19 @@ fn media_info_from_path(path: &Path) -> Result<MediaInfo, String> {
     }
 }
 
+fn normalize_tweet_text(text: &str) -> String {
+    let text = text.replace(['\u{2014}', '\u{2013}'], "-");
+    // LLM callers sometimes double-escape newlines in tool-call JSON, so the
+    // decoded string arrives with literal `\n` sequences and no real line
+    // breaks. Only unescape in that case — text that already has real
+    // newlines may contain intentional literal `\n` (e.g. code snippets).
+    if !text.contains('\n') && text.contains("\\n") {
+        text.replace("\\n", "\n")
+    } else {
+        text
+    }
+}
+
 fn validate_media_combination(infos: &[MediaInfo]) -> Result<(), String> {
     if infos.len() <= 1 {
         return Ok(());
@@ -1646,6 +1932,61 @@ access_token_secret = "ts"
         ];
         let err = validate_media_combination(&infos).unwrap_err();
         assert!(err.contains("Maximum 4"));
+    }
+
+    #[test]
+    fn normalize_unescapes_literal_newlines_when_no_real_ones() {
+        let mangled = "Hook line.\\n\\nSecond paragraph?";
+        assert_eq!(
+            normalize_tweet_text(mangled),
+            "Hook line.\n\nSecond paragraph?"
+        );
+    }
+
+    #[test]
+    fn normalize_keeps_literal_newlines_alongside_real_ones() {
+        let code = "Line one has code:\nprintf(\"hi\\n\");";
+        assert_eq!(normalize_tweet_text(code), code);
+    }
+
+    #[test]
+    fn normalize_leaves_plain_text_untouched() {
+        let plain = "Just a tweet.\n\nWith real paragraphs.";
+        assert_eq!(normalize_tweet_text(plain), plain);
+    }
+
+    #[test]
+    fn normalize_replaces_em_and_en_dashes() {
+        assert_eq!(normalize_tweet_text("a \u{2014} b \u{2013} c"), "a - b - c");
+    }
+
+    #[test]
+    fn trends_response_deserializes_official_shape() {
+        let json = r##"{
+            "data": [
+                { "trend_name": "#Rust", "tweet_count": 12345 },
+                { "trend_name": "AI News" }
+            ]
+        }"##;
+        let resp: TrendsResponse = serde_json::from_str(json).unwrap();
+        let items = resp.data.unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].name, "#Rust");
+        assert_eq!(items[0].tweet_count, Some(12345));
+        assert_eq!(items[1].name, "AI News");
+        assert_eq!(items[1].tweet_count, None);
+    }
+
+    #[test]
+    fn trends_response_handles_alias_fields() {
+        // Some wrappers / future responses might use name / tweet_volume
+        let json = r##"{
+            "data": [ { "name": "HelloWorld", "tweet_volume": 999 } ]
+        }"##;
+        let resp: TrendsResponse = serde_json::from_str(json).unwrap();
+        let item = &resp.data.unwrap()[0];
+        assert_eq!(item.name, "HelloWorld");
+        assert_eq!(item.tweet_count, Some(999));
     }
 }
 

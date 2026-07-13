@@ -8,13 +8,14 @@ macro_rules! try_tool {
 }
 
 use crate::api::{
-    AppConfig, DmEventResult, MeData, MediaAttachment, PostResult, SearchTweetResult, UserProfile,
-    UserSummary, XClient,
+    AppConfig, DmEventResult, MeData, MediaAttachment, PostResult, SearchTweetResult, Trend,
+    UserProfile, UserSummary, XClient,
 };
 use crate::params::{
-    AccountOnlyParams, FollowsLookupParams, GetAllFollowsParams, GetDmEventsParams,
-    LookupUserParams, PostThreadParams, PostTweetParams, SearchTweetsParams, SendDmParams,
-    TimelineParams, TweetIdParams, UploadMediaParams,
+    AccountOnlyParams, FollowsLookupParams, GetAllFollowsParams, GetBookmarksParams,
+    GetDmEventsParams, GetTrendsParams, LookupUserParams, PostThreadParams, PostTweetParams,
+    SearchTweetsParams, SendDmParams, TimelineParams, TweetIdParams, UpdateProfileBannerParams,
+    UpdateProfileParams, UploadMediaParams,
 };
 use reqwest::Client;
 use rmcp::{
@@ -238,6 +239,26 @@ impl PostXServer {
         output
     }
 
+    /// Client-side length checks (X counts Unicode scalar values) so the caller
+    /// gets a friendly error before the request instead of a raw 400/403.
+    fn validate_profile_lengths(params: &UpdateProfileParams) -> Option<String> {
+        fn check(field: &str, val: &Option<String>, max: usize) -> Option<String> {
+            val.as_ref().and_then(|v| {
+                let len = v.chars().count();
+                (len > max).then(|| format!("{field} is too long: {len} characters (max {max})."))
+            })
+        }
+
+        if params.name.as_ref().is_some_and(|n| n.trim().is_empty()) {
+            return Some("name cannot be empty.".to_string());
+        }
+
+        check("name", &params.name, 50)
+            .or_else(|| check("description", &params.description, 160))
+            .or_else(|| check("location", &params.location, 30))
+            .or_else(|| check("url", &params.url, 100))
+    }
+
     fn extract_tweet_id(input: &str) -> &str {
         let trimmed = input.trim();
         if let Some(rest) = trimmed.split("/status/").nth(1) {
@@ -309,6 +330,33 @@ impl PostXServer {
         output
     }
 
+    fn format_trends(trends: &[Trend], woeid: u64) -> String {
+        if trends.is_empty() {
+            return format!("No trends found for WOEID {woeid}.");
+        }
+
+        let location = match woeid {
+            1 => "Worldwide".to_string(),
+            23424977 => "United States".to_string(),
+            23424975 => "United Kingdom".to_string(),
+            23424856 => "Japan".to_string(),
+            2459115 => "New York".to_string(),
+            44418 => "London".to_string(),
+            1118370 => "Tokyo".to_string(),
+            _ => format!("WOEID {}", woeid),
+        };
+
+        let mut output = format!("Trending in {} (WOEID {}):\n", location, woeid);
+        for (i, t) in trends.iter().enumerate() {
+            let vol = t
+                .tweet_count
+                .map(|v| format!(" ({v} posts)"))
+                .unwrap_or_default();
+            output.push_str(&format!("  {}. {}{}\n", i + 1, t.name, vol));
+        }
+        output
+    }
+
     fn append_pagination(output: &mut String, next_token: &Option<String>) {
         if let Some(token) = next_token {
             output.push_str(&format!("\nMore results available. Next page token: {token}"));
@@ -351,10 +399,10 @@ impl PostXServer {
                  which X account to use (omit for default). \
                  Available accounts: {}. \
                  Tools: post_tweet, post_thread, upload_media, \
-                 delete_tweet, search_tweets, get_timeline, get_me, lookup_user, \
+                 delete_tweet, search_tweets, get_timeline, get_bookmarks, get_me, lookup_user, \
                  get_followers, get_following, get_all_followers, get_all_following, \
                  follow_user, unfollow_user, like_tweet, unlike_tweet, retweet, \
-                 unretweet, get_dm_events, send_dm, list_accounts.",
+                 unretweet, bookmark_tweet, unbookmark_tweet, get_trends, update_profile, update_profile_banner, get_dm_events, send_dm, list_accounts.",
                 accounts_str.join(", ")
             )
         };
@@ -513,6 +561,86 @@ impl PostXServer {
                 "Media uploaded (account: {account})!\nMedia ID: {}\nType: {}\nState: {}",
                 r.media_id, r.media_type, r.state
             )
+        })))
+    }
+
+    #[tool(
+        description = "Update the X (Twitter) profile banner (header image) for the authenticated user. This uses the legacy v1.1 account endpoint. Provide a local static image (JPEG/PNG/WebP, max 5MB; X recommends 1500x500). The banner param is sent base64-encoded (not via media_id). Optional crop parameters supported."
+    )]
+    async fn update_profile_banner(
+        &self,
+        Parameters(params): Parameters<UpdateProfileBannerParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let (account, client) = try_tool!(self.require_account(params.account.as_deref()));
+
+        let result = client
+            .update_profile_banner(
+                &params.path,
+                params.width,
+                params.height,
+                params.offset_left,
+                params.offset_top,
+            )
+            .await;
+
+        Ok(Self::ok_or_err(result.map(|_| {
+            format!(
+                "Profile banner updated successfully (account: {account})!\nImage: {}",
+                params.path
+            )
+        })))
+    }
+
+    #[tool(
+        description = "Update the authenticated X (Twitter) user's profile text: bio/description, display name, location, and/or website URL. At least one field must be provided; only the fields you pass are changed, and passing an empty string clears that field. Uses the legacy v1.1 account/update_profile endpoint (requires Read+Write app permission). Limits: name <=50, description <=160, location <=30, url <=100 characters."
+    )]
+    async fn update_profile(
+        &self,
+        Parameters(params): Parameters<UpdateProfileParams>,
+    ) -> Result<CallToolResult, McpError> {
+        if params.description.is_none()
+            && params.name.is_none()
+            && params.location.is_none()
+            && params.url.is_none()
+        {
+            return Ok(CallToolResult::error(vec![Content::text(
+                "Provide at least one field to update (description, name, location, or url).",
+            )]));
+        }
+        if let Some(err) = Self::validate_profile_lengths(&params) {
+            return Ok(CallToolResult::error(vec![Content::text(err)]));
+        }
+
+        let (account, client) = try_tool!(self.require_account(params.account.as_deref()));
+        let account = account.to_string();
+        let client = client.clone();
+
+        let result = client
+            .update_profile(
+                params.name.as_deref(),
+                params.description.as_deref(),
+                params.location.as_deref(),
+                params.url.as_deref(),
+            )
+            .await;
+
+        // Display name may have changed — drop cached identity so it refetches.
+        if result.is_ok() {
+            self.cached_me.lock().await.remove(&account);
+        }
+
+        Ok(Self::ok_or_err(result.map(|p| {
+            let mut out = format!("Profile updated successfully (account: {account})!");
+            if let Some(d) = &p.description {
+                out.push_str(&format!("\n  Bio: {d}"));
+            }
+            if let Some(n) = &p.name {
+                out.push_str(&format!("\n  Name: {n}"));
+            }
+            if let Some(l) = p.location.as_ref().filter(|l| !l.is_empty()) {
+                out.push_str(&format!("\n  Location: {l}"));
+            }
+            out
         })))
     }
 
@@ -790,6 +918,42 @@ impl PostXServer {
         ))
     }
 
+    #[tool(description = "Bookmark a tweet on X (Twitter). Accepts a tweet ID or tweet URL.")]
+    async fn bookmark_tweet(
+        &self,
+        Parameters(params): Parameters<TweetIdParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let tweet_id = try_tool!(Self::require_tweet_id(&params.tweet_id));
+
+        let (_account, client, me) =
+            try_tool!(self.require_me_for(params.account.as_deref()).await);
+
+        Ok(Self::ok_or_err(
+            client
+                .bookmark_tweet(&me.id, tweet_id)
+                .await
+                .map(|bookmarked| format!("Tweet {tweet_id} bookmarked: {bookmarked}")),
+        ))
+    }
+
+    #[tool(description = "Remove a bookmark on X (Twitter). Accepts a tweet ID or tweet URL.")]
+    async fn unbookmark_tweet(
+        &self,
+        Parameters(params): Parameters<TweetIdParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let tweet_id = try_tool!(Self::require_tweet_id(&params.tweet_id));
+
+        let (_account, client, me) =
+            try_tool!(self.require_me_for(params.account.as_deref()).await);
+
+        Ok(Self::ok_or_err(
+            client
+                .unbookmark_tweet(&me.id, tweet_id)
+                .await
+                .map(|bookmarked| format!("Tweet {tweet_id} unbookmarked (bookmarked: {bookmarked})")),
+        ))
+    }
+
     #[tool(
         description = "Search recent tweets on X (Twitter) from the last 7 days. Supports operators: from:user, #hashtag, @mention, \"exact phrase\", -exclude, lang:en, etc."
     )]
@@ -845,6 +1009,45 @@ impl PostXServer {
 
         Ok(Self::ok_or_err(
             result.map(|r| Self::format_search_results("timeline", &r.tweets, &r.next_token)),
+        ))
+    }
+
+    #[tool(
+        description = "Get bookmarked tweets for the authenticated user on X (Twitter). Paginated, returns recent bookmarks first."
+    )]
+    async fn get_bookmarks(
+        &self,
+        Parameters(params): Parameters<GetBookmarksParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let (_account, client, me) =
+            try_tool!(self.require_me_for(params.account.as_deref()).await);
+
+        let max_results = params.max_results.unwrap_or(20).clamp(1, 100);
+
+        let result = client
+            .get_bookmarks(&me.id, max_results, params.pagination_token.as_deref())
+            .await;
+
+        Ok(Self::ok_or_err(
+            result.map(|r| Self::format_search_results("bookmarks", &r.tweets, &r.next_token)),
+        ))
+    }
+
+    #[tool(
+        description = "Get current trending topics on X (Twitter) for a location by WOEID. Defaults to Worldwide (WOEID 1). Returns trend names and post volumes where available. Use to discover what's happening."
+    )]
+    async fn get_trends(
+        &self,
+        Parameters(params): Parameters<GetTrendsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let (_account, client) = try_tool!(self.require_account(params.account.as_deref()));
+
+        let woeid = params.woeid.unwrap_or(1);
+
+        let result = client.get_trends(woeid).await;
+
+        Ok(Self::ok_or_err(
+            result.map(|r| Self::format_trends(&r.trends, r.woeid)),
         ))
     }
 
@@ -943,5 +1146,86 @@ mod tests {
         assert!(t.len() <= 10);
         // Should be valid UTF-8
         assert!(std::str::from_utf8(t.as_bytes()).is_ok());
+    }
+
+    fn profile_params(
+        name: Option<&str>,
+        description: Option<&str>,
+        location: Option<&str>,
+        url: Option<&str>,
+    ) -> UpdateProfileParams {
+        UpdateProfileParams {
+            account: None,
+            name: name.map(str::to_string),
+            description: description.map(str::to_string),
+            location: location.map(str::to_string),
+            url: url.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn validate_profile_lengths_accepts_valid_and_empty_clears() {
+        // In-range values, plus empty strings (used to clear a field) are fine.
+        let p = profile_params(Some("New Name"), Some(""), Some(""), Some(""));
+        assert!(PostXServer::validate_profile_lengths(&p).is_none());
+    }
+
+    #[test]
+    fn validate_profile_lengths_rejects_overlong_bio() {
+        let long_bio = "x".repeat(161);
+        let p = profile_params(None, Some(&long_bio), None, None);
+        let err = PostXServer::validate_profile_lengths(&p).unwrap();
+        assert!(err.contains("description is too long"));
+        assert!(err.contains("161"));
+    }
+
+    #[test]
+    fn validate_profile_lengths_counts_unicode_scalars() {
+        // 160 multi-byte chars is within the 160-char limit despite >160 bytes.
+        let bio: String = "é".repeat(160);
+        let p = profile_params(None, Some(&bio), None, None);
+        assert!(PostXServer::validate_profile_lengths(&p).is_none());
+    }
+
+    #[test]
+    fn validate_profile_lengths_rejects_blank_name() {
+        // A provided-but-empty name would blank the display name — reject it.
+        let p = profile_params(Some("   "), None, None, None);
+        let err = PostXServer::validate_profile_lengths(&p).unwrap();
+        assert!(err.contains("name cannot be empty"));
+    }
+
+    #[test]
+    fn format_trends_worldwide_default() {
+        let trends = vec![
+            Trend {
+                name: "#RustLang".to_string(),
+                tweet_count: Some(42000),
+            },
+            Trend {
+                name: "Breaking News".to_string(),
+                tweet_count: None,
+            },
+        ];
+        let output = PostXServer::format_trends(&trends, 1);
+        assert!(output.contains("Worldwide"));
+        assert!(output.contains("WOEID 1"));
+        assert!(output.contains("#RustLang (42000 posts)"));
+        assert!(output.contains("Breaking News"));
+        assert!(!output.contains("No trends"));
+    }
+
+    #[test]
+    fn format_trends_specific_locations_and_empty() {
+        let trends = vec![Trend {
+            name: "#Test".to_string(),
+            tweet_count: Some(100),
+        }];
+        let us = PostXServer::format_trends(&trends, 23424977);
+        assert!(us.contains("United States"));
+        let jp = PostXServer::format_trends(&trends, 23424856);
+        assert!(jp.contains("Japan"));
+        let empty = PostXServer::format_trends(&[], 1);
+        assert!(empty.contains("No trends found"));
     }
 }

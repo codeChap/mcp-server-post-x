@@ -13,8 +13,11 @@ Communicates via stdio using JSON-RPC 2.0.
 | `post_thread` | Post a thread of up to 25 tweets, each with optional media |
 | `delete_tweet` | Delete a tweet by ID or URL |
 | `upload_media` | Upload media for later attachment (returns a media_id) |
+| `update_profile` | Update your bio/description, display name, location, and/or website URL (legacy v1.1 endpoint) |
+| `update_profile_banner` | Update profile header/banner image (legacy v1.1 endpoint) |
 | `search_tweets` | Search recent tweets (last 7 days) with Twitter operators |
 | `get_timeline` | Get your home timeline in reverse chronological order |
+| `get_bookmarks` | Get your bookmarked tweets (paginated) |
 | `get_me` | Get the authenticated user's profile |
 | `lookup_user` | Look up any user by @username or numeric ID |
 | `get_followers` | List your followers (paginated) |
@@ -25,6 +28,9 @@ Communicates via stdio using JSON-RPC 2.0.
 | `unlike_tweet` | Unlike a tweet by ID or URL |
 | `retweet` | Retweet a tweet by ID or URL |
 | `unretweet` | Undo a retweet by ID or URL |
+| `bookmark_tweet` | Bookmark a tweet by ID or URL |
+| `unbookmark_tweet` | Remove a bookmark by ID or URL |
+| `get_trends` | Get current trending topics for a WOEID location (default: worldwide) |
 | `get_dm_events` | Get recent direct messages across all conversations |
 | `send_dm` | Send a direct message to a conversation |
 | `follow_user` | Follow a user by username or ID |
@@ -158,7 +164,7 @@ No required parameters. Returns available account names, which is the default, a
 | `account` | string | no | Account to use (omit for default) |
 | `tweets` | array | yes | Array of tweets (max 25). Each: `{ text, media? }` |
 
-### delete_tweet / like_tweet / unlike_tweet / retweet / unretweet
+### delete_tweet / like_tweet / unlike_tweet / retweet / unretweet / bookmark_tweet / unbookmark_tweet
 
 | Param | Type | Required | Description |
 |-------|------|----------|-------------|
@@ -177,6 +183,35 @@ All accept URLs like `https://x.com/user/status/123456` — the ID is extracted 
 
 Returns a `media_id` to use with `post_tweet`'s `media_ids` param.
 
+### update_profile
+
+Update the authenticated user's profile text fields. At least one field must be provided; only the fields you pass are changed, and passing an empty string clears that field.
+
+| Param | Type | Required | Description |
+|-------|------|----------|-------------|
+| `account` | string | no | Account to use (omit for default) |
+| `description` | string | no* | New bio/description (max 160 chars; empty string clears it) |
+| `name` | string | no* | New display name (1-50 chars) |
+| `location` | string | no* | New location (max 30 chars; empty string clears it) |
+| `url` | string | no* | New website URL shown on the profile (max 100 chars; empty string clears it) |
+
+\* At least one of `description`, `name`, `location`, or `url` is required.
+
+Uses the legacy `POST /1.1/account/update_profile.json` endpoint (no v2 equivalent). Requires the app to have **Read and Write** permission; without it the endpoint returns 403.
+
+### update_profile_banner
+
+| Param | Type | Required | Description |
+|-------|------|----------|-------------|
+| `account` | string | no | Account to use (omit for default) |
+| `path` | string | yes | Local file path to banner image (JPEG/PNG/WebP only, max 5MB). X recommends 1500x500 pixels. |
+| `width` | integer | no | Width of the image (for cropping) |
+| `height` | integer | no | Height of the image (for cropping) |
+| `offset_left` | integer | no | Left offset (pixels) for crop start |
+| `offset_top` | integer | no | Top offset (pixels) for crop start |
+
+Uses the legacy `POST /1.1/account/update_profile_banner.json` endpoint (base64 `banner` param; no v2 equivalent). Success returns HTTP 200 with no body.
+
 ### search_tweets
 
 | Param | Type | Required | Description |
@@ -187,6 +222,15 @@ Returns a `media_id` to use with `post_tweet`'s `media_ids` param.
 | `sort_order` | string | no | `recency` or `relevancy` |
 | `pagination_token` | string | no | Next page token from previous response |
 
+### get_trends
+
+| Param | Type | Required | Description |
+|-------|------|----------|-------------|
+| `account` | string | no | Account to use (omit for default; determines which app's rate limit is used) |
+| `woeid` | integer | no | WOEID for location (default: 1 = Worldwide). See common values in tool description. |
+
+Returns trend names and approximate post volumes.
+
 ### get_timeline
 
 | Param | Type | Required | Description |
@@ -194,6 +238,14 @@ Returns a `media_id` to use with `post_tweet`'s `media_ids` param.
 | `account` | string | no | Account to use (omit for default) |
 | `max_results` | integer | no | 1-100 (default 20) |
 | `exclude` | string | no | `replies`, `retweets`, or both comma-separated |
+| `pagination_token` | string | no | Next page token |
+
+### get_bookmarks
+
+| Param | Type | Required | Description |
+|-------|------|----------|-------------|
+| `account` | string | no | Account to use (omit for default) |
+| `max_results` | integer | no | 1-100 (default 20) |
 | `pagination_token` | string | no | Next page token |
 
 ### lookup_user / follow_user / unfollow_user
