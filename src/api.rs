@@ -704,8 +704,10 @@ impl XClient {
     }
 
     /// Update the user's profile banner (header image) using the legacy v1.1 endpoint.
-    /// The `banner` value is base64-encoded image data and is deliberately excluded from the OAuth signature
-    /// (per the same pattern used for media uploads, as the param is large binary-derived data).
+    /// The body is application/x-www-form-urlencoded, so per OAuth 1.0a (RFC 5849 §3.4.1.3.1)
+    /// ALL body params — including the large base64 `banner` — MUST be part of the signature base
+    /// string. (This is the opposite of the multipart media-upload endpoints, where the body is
+    /// excluded from the signature; copying that exclusion here yields a 401 signature mismatch.)
     pub async fn update_profile_banner(
         &self,
         path: &str,
@@ -744,7 +746,7 @@ impl XClient {
             std::fs::read(file_path).map_err(|e| format!("Failed to read file: {e}"))?;
         let banner_b64 = BASE64.encode(&file_bytes);
 
-        // Crop/position params for signing (banner itself must be excluded from signature)
+        // Crop/position params; the banner is added below and the whole body is signed together.
         let mut sign_params = BTreeMap::new();
         if let Some(w) = width {
             sign_params.insert("width".to_string(), w.to_string());
@@ -759,13 +761,14 @@ impl XClient {
             sign_params.insert("offset_top".to_string(), t.to_string());
         }
 
-        // Body includes the (large) banner + any crop params
+        // Body includes the (large) banner + any crop params. Signature must cover the whole
+        // urlencoded body, so we sign over body_params (banner included), not just the crop params.
         let mut body_params = sign_params.clone();
         body_params.insert("banner".to_string(), banner_b64);
 
         let resp = self
             .retry_503(|| {
-                let auth = self.oauth_header("POST", UPDATE_BANNER_URL, &sign_params);
+                let auth = self.oauth_header("POST", UPDATE_BANNER_URL, &body_params);
                 self.http
                     .post(UPDATE_BANNER_URL)
                     .header("Authorization", auth)
