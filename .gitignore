@@ -1,5 +1,6 @@
 target/
 post-x
+mcp-server-x
 
 # Local test images and prompt examples (not part of published server)
 ai-grift-tweet.jpg

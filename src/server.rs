@@ -28,7 +28,7 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 
 #[derive(Clone)]
-pub struct PostXServer {
+pub struct XServer {
     clients: HashMap<String, Arc<XClient>>,
     default_account: String,
     cached_me: Arc<Mutex<HashMap<String, MeData>>>,
@@ -36,7 +36,7 @@ pub struct PostXServer {
     tool_router: ToolRouter<Self>,
 }
 
-impl PostXServer {
+impl XServer {
     fn resolve_account<'a>(
         &'a self,
         account: Option<&'a str>,
@@ -365,7 +365,7 @@ impl PostXServer {
 }
 
 #[tool_router]
-impl PostXServer {
+impl XServer {
     pub fn new(config: AppConfig) -> Self {
         let http = Client::builder()
             .timeout(Duration::from_secs(60))
@@ -1105,11 +1105,11 @@ impl PostXServer {
 }
 
 #[tool_handler]
-impl ServerHandler for PostXServer {
+impl ServerHandler for XServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new(
-                "mcp-server-post-x",
+                "mcp-server-x",
                 env!("CARGO_PKG_VERSION"),
             ))
             .with_instructions(&self.instructions)
@@ -1123,26 +1123,26 @@ mod tests {
     #[test]
     fn extract_tweet_id_from_url_variants() {
         assert_eq!(
-            PostXServer::extract_tweet_id("https://x.com/elonmusk/status/1234567890"),
+            XServer::extract_tweet_id("https://x.com/elonmusk/status/1234567890"),
             "1234567890"
         );
         assert_eq!(
-            PostXServer::extract_tweet_id("https://twitter.com/user/status/9876543210?s=20"),
+            XServer::extract_tweet_id("https://twitter.com/user/status/9876543210?s=20"),
             "9876543210"
         );
         assert_eq!(
-            PostXServer::extract_tweet_id("https://x.com/user/status/555666777#likes"),
+            XServer::extract_tweet_id("https://x.com/user/status/555666777#likes"),
             "555666777"
         );
-        assert_eq!(PostXServer::extract_tweet_id("1234567890"), "1234567890");
-        assert_eq!(PostXServer::extract_tweet_id("   42   "), "42");
-        assert_eq!(PostXServer::extract_tweet_id(""), "");
+        assert_eq!(XServer::extract_tweet_id("1234567890"), "1234567890");
+        assert_eq!(XServer::extract_tweet_id("   42   "), "42");
+        assert_eq!(XServer::extract_tweet_id(""), "");
     }
 
     #[test]
     fn truncate_str_respects_char_boundaries() {
         let s = "héllo world — this is a test";
-        let t = PostXServer::truncate_str(s, 10);
+        let t = XServer::truncate_str(s, 10);
         assert!(t.len() <= 10);
         // Should be valid UTF-8
         assert!(std::str::from_utf8(t.as_bytes()).is_ok());
@@ -1167,14 +1167,14 @@ mod tests {
     fn validate_profile_lengths_accepts_valid_and_empty_clears() {
         // In-range values, plus empty strings (used to clear a field) are fine.
         let p = profile_params(Some("New Name"), Some(""), Some(""), Some(""));
-        assert!(PostXServer::validate_profile_lengths(&p).is_none());
+        assert!(XServer::validate_profile_lengths(&p).is_none());
     }
 
     #[test]
     fn validate_profile_lengths_rejects_overlong_bio() {
         let long_bio = "x".repeat(161);
         let p = profile_params(None, Some(&long_bio), None, None);
-        let err = PostXServer::validate_profile_lengths(&p).unwrap();
+        let err = XServer::validate_profile_lengths(&p).unwrap();
         assert!(err.contains("description is too long"));
         assert!(err.contains("161"));
     }
@@ -1184,14 +1184,14 @@ mod tests {
         // 160 multi-byte chars is within the 160-char limit despite >160 bytes.
         let bio: String = "é".repeat(160);
         let p = profile_params(None, Some(&bio), None, None);
-        assert!(PostXServer::validate_profile_lengths(&p).is_none());
+        assert!(XServer::validate_profile_lengths(&p).is_none());
     }
 
     #[test]
     fn validate_profile_lengths_rejects_blank_name() {
         // A provided-but-empty name would blank the display name — reject it.
         let p = profile_params(Some("   "), None, None, None);
-        let err = PostXServer::validate_profile_lengths(&p).unwrap();
+        let err = XServer::validate_profile_lengths(&p).unwrap();
         assert!(err.contains("name cannot be empty"));
     }
 
@@ -1207,7 +1207,7 @@ mod tests {
                 tweet_count: None,
             },
         ];
-        let output = PostXServer::format_trends(&trends, 1);
+        let output = XServer::format_trends(&trends, 1);
         assert!(output.contains("Worldwide"));
         assert!(output.contains("WOEID 1"));
         assert!(output.contains("#RustLang (42000 posts)"));
@@ -1221,11 +1221,11 @@ mod tests {
             name: "#Test".to_string(),
             tweet_count: Some(100),
         }];
-        let us = PostXServer::format_trends(&trends, 23424977);
+        let us = XServer::format_trends(&trends, 23424977);
         assert!(us.contains("United States"));
-        let jp = PostXServer::format_trends(&trends, 23424856);
+        let jp = XServer::format_trends(&trends, 23424856);
         assert!(jp.contains("Japan"));
-        let empty = PostXServer::format_trends(&[], 1);
+        let empty = XServer::format_trends(&[], 1);
         assert!(empty.contains("No trends found"));
     }
 }

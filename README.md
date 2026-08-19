@@ -1,4 +1,4 @@
-# mcp-server-post-x
+# mcp-server-x
 
 An MCP (Model Context Protocol) server for X (Twitter). Built in Rust using OAuth 1.0a and the X API v2. Supports multiple accounts.
 
@@ -46,32 +46,36 @@ All tools accept an optional `account` parameter to select which X account to us
 cargo build --release
 ```
 
-Produces `target/release/post-x` (optimized with LTO, stripped).
+Produces `target/release/mcp-server-x` (optimized with LTO, stripped).
 
 ### 2. Configure credentials
 
-The server looks for the config at the first of:
-- `$XDG_CONFIG_HOME/mcp-server-post-x/config.toml`
-- `~/.config/mcp-server-post-x/config.toml`
+The server looks for the config at the first existing of:
+- `$XDG_CONFIG_HOME/mcp-server-x/config.toml`
+- `~/.config/mcp-server-x/config.toml`
+- `$XDG_CONFIG_HOME/mcp-server-post-x/config.toml` (legacy)
+- `~/.config/mcp-server-post-x/config.toml` (legacy)
 
 You can also run **without any config file** by providing credentials via environment variables (great for containers/CI):
 
 ```bash
-export POST_X_API_KEY=...
-export POST_X_API_KEY_SECRET=...
-export POST_X_ACCESS_TOKEN=...
-export POST_X_ACCESS_TOKEN_SECRET=...
+export X_API_KEY=...
+export X_API_KEY_SECRET=...
+export X_ACCESS_TOKEN=...
+export X_ACCESS_TOKEN_SECRET=...
 # Optional:
-# export POST_X_ACCOUNT_NAME=myaccount
+# export X_ACCOUNT_NAME=myaccount
 ```
+
+`POST_X_*` / `POST_X_ACCOUNT_NAME` are still accepted if the `X_*` vars are unset.
 
 Create the config file (classic approach):
 
 ```bash
-mkdir -p ~/.config/mcp-server-post-x
+mkdir -p ~/.config/mcp-server-x
 ```
 
-Create `~/.config/mcp-server-post-x/config.toml`:
+Create `~/.config/mcp-server-x/config.toml`:
 
 **Single account** (no `default_account` needed):
 
@@ -110,8 +114,8 @@ Notes:
 Secure it:
 
 ```bash
-chmod 700 ~/.config/mcp-server-post-x
-chmod 600 ~/.config/mcp-server-post-x/config.toml
+chmod 700 ~/.config/mcp-server-x
+chmod 600 ~/.config/mcp-server-x/config.toml
 ```
 
 See [Getting credentials](#getting-credentials) below for how to obtain these.
@@ -123,8 +127,8 @@ Claude Code (`~/.claude.json`):
 ```json
 {
   "mcpServers": {
-    "post-x": {
-      "command": "/path/to/post-x"
+    "x": {
+      "command": "/path/to/mcp-server-x"
     }
   }
 }

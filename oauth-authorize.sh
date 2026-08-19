@@ -121,7 +121,7 @@ if echo "$RESPONSE" | grep -q "oauth_token="; then
     echo ""
     echo "=== Success! Authorized as @${SCREEN_NAME}"
     echo ""
-    echo "Add this block to your config file (usually ~/.config/mcp-server-post-x/config.toml):"
+    echo "Add this block to your config file (usually ~/.config/mcp-server-x/config.toml):"
     echo ""
     echo "[accounts.${SCREEN_NAME}]"
     echo "api_key = \"${API_KEY}\""

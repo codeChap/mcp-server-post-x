@@ -834,7 +834,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "mcp-server-post-x"
+name = "mcp-server-x"
 version = "0.1.0"
 dependencies = [
  "base64",
