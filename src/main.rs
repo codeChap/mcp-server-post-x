@@ -11,7 +11,7 @@ use tracing_subscriber::EnvFilter;
 const CONFIG_DIR_NEW: &str = "mcp-server-x";
 const CONFIG_DIR_LEGACY: &str = "mcp-server-post-x";
 
-fn load_config() -> Result<AppConfig, Box<dyn std::error::Error>> {
+fn load_config() -> Result<(AppConfig, Option<PathBuf>), Box<dyn std::error::Error>> {
     let path = resolve_config_path();
 
     // Support a pure environment-variable single-account mode when no config file exists.
@@ -21,7 +21,7 @@ fn load_config() -> Result<AppConfig, Box<dyn std::error::Error>> {
             tracing::info!(
                 "Config loaded from environment variables (single account, no config file)"
             );
-            return Ok(config);
+            return Ok((config, None));
         }
     }
 
@@ -53,7 +53,7 @@ fn load_config() -> Result<AppConfig, Box<dyn std::error::Error>> {
         config.default_account,
         path.display()
     );
-    Ok(config)
+    Ok((config, Some(path)))
 }
 
 fn config_home() -> PathBuf {
@@ -134,8 +134,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_writer(std::io::stderr)
         .init();
 
-    let config = load_config()?;
-    let server = XServer::new(config);
+    let (config, config_path) = load_config()?;
+    let server = XServer::new(config, config_path);
     let service = server.serve(stdio()).await?;
     service.waiting().await?;
     Ok(())

@@ -23,6 +23,7 @@ use rmcp::{
     handler::server::wrapper::Parameters, model::*, tool, tool_handler, tool_router,
 };
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
@@ -366,7 +367,7 @@ impl XServer {
 
 #[tool_router]
 impl XServer {
-    pub fn new(config: AppConfig) -> Self {
+    pub fn new(config: AppConfig, config_path: Option<PathBuf>) -> Self {
         let http = Client::builder()
             .timeout(Duration::from_secs(60))
             .build()
@@ -379,7 +380,10 @@ impl XServer {
         let clients: HashMap<String, Arc<XClient>> = config
             .accounts
             .into_iter()
-            .map(|(name, acct)| (name, Arc::new(XClient::new(acct, http.clone()))))
+            .map(|(name, acct)| {
+                let client = XClient::new(name.clone(), acct, http.clone(), config_path.clone());
+                (name, Arc::new(client))
+            })
             .collect();
 
         let instructions = {

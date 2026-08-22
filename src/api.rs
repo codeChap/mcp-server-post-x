@@ -9,10 +9,13 @@ use serde::de::DeserializeOwned;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::io::Read;
-use std::path::Path;
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tokio::sync::Mutex;
 
 const TWEETS_URL: &str = "https://api.x.com/2/tweets";
+const OAUTH2_TOKEN_URL: &str = "https://api.x.com/2/oauth2/token";
 const MEDIA_UPLOAD_URL: &str = "https://upload.twitter.com/1.1/media/upload.json";
 const MEDIA_METADATA_URL: &str = "https://upload.twitter.com/1.1/media/metadata/create.json";
 const ME_URL: &str = "https://api.x.com/2/users/me";
@@ -66,6 +69,18 @@ pub struct AccountConfig {
     pub api_key_secret: String,
     pub access_token: String,
     pub access_token_secret: String,
+    /// OAuth 2.0 Confidential Client ID (from the X Developer Console).
+    #[serde(default)]
+    pub oauth2_client_id: Option<String>,
+    /// OAuth 2.0 client secret. Optional; only needed to refresh user tokens.
+    #[serde(default)]
+    pub oauth2_client_secret: Option<String>,
+    /// OAuth 2.0 User Context access token. Required for bookmark write/delete.
+    #[serde(default)]
+    pub oauth2_access_token: Option<String>,
+    /// OAuth 2.0 refresh token (`offline.access`). Optional.
+    #[serde(default)]
+    pub oauth2_refresh_token: Option<String>,
 }
 
 impl fmt::Debug for AccountConfig {
@@ -75,6 +90,22 @@ impl fmt::Debug for AccountConfig {
             .field("api_key_secret", &"***REDACTED***")
             .field("access_token", &"***REDACTED***")
             .field("access_token_secret", &"***REDACTED***")
+            .field(
+                "oauth2_client_id",
+                &self.oauth2_client_id.as_ref().map(|_| "***REDACTED***"),
+            )
+            .field(
+                "oauth2_client_secret",
+                &self.oauth2_client_secret.as_ref().map(|_| "***REDACTED***"),
+            )
+            .field(
+                "oauth2_access_token",
+                &self.oauth2_access_token.as_ref().map(|_| "***REDACTED***"),
+            )
+            .field(
+                "oauth2_refresh_token",
+                &self.oauth2_refresh_token.as_ref().map(|_| "***REDACTED***"),
+            )
             .finish()
     }
 }
@@ -87,6 +118,28 @@ impl AccountConfig {
             }
         }
         Ok(())
+    }
+
+    /// OAuth 2.0 User Context access token, if configured and non-blank.
+    pub fn oauth2_user_token(&self) -> Option<&str> {
+        self.oauth2_access_token
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    }
+
+    /// Authorization header for bookmark manage endpoints (OAuth 2.0 User Context only).
+    pub fn bookmark_authorization(&self) -> Result<String, String> {
+        match self.oauth2_user_token() {
+            Some(token) => Ok(format!("Bearer {token}")),
+            None => Err(
+                "Bookmark write/delete requires OAuth 2.0 User Context. \
+                 Add oauth2_access_token for this account in config.toml \
+                 (X Developer Console → App → Keys & Tokens → OAuth 2.0 Access Token, \
+                 with bookmark.read + bookmark.write)."
+                    .into(),
+            ),
+        }
     }
 }
 
@@ -144,6 +197,99 @@ impl AppConfig {
     }
 }
 
+#[derive(Debug, Deserialize)]
+struct Oauth2TokenResponse {
+    access_token: String,
+    #[serde(default)]
+    refresh_token: Option<String>,
+    #[serde(default)]
+    expires_in: Option<u64>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct Oauth2TokenSet {
+    access_token: String,
+    refresh_token: Option<String>,
+    expires_in: Option<u64>,
+}
+
+fn parse_oauth2_token_response(json: &str) -> Result<Oauth2TokenSet, String> {
+    let parsed: Oauth2TokenResponse = serde_json::from_str(json)
+        .map_err(|e| format!("Failed to parse OAuth 2.0 token response: {e}"))?;
+    if parsed.access_token.trim().is_empty() {
+        return Err("OAuth 2.0 token response missing access_token".into());
+    }
+    Ok(Oauth2TokenSet {
+        access_token: parsed.access_token,
+        refresh_token: parsed
+            .refresh_token
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
+        expires_in: parsed.expires_in,
+    })
+}
+
+fn oauth2_refresh_parts(
+    client_id: &str,
+    client_secret: Option<&str>,
+    refresh_token: &str,
+) -> (Option<String>, BTreeMap<String, String>) {
+    let mut form = BTreeMap::new();
+    form.insert("grant_type".into(), "refresh_token".into());
+    form.insert("refresh_token".into(), refresh_token.to_string());
+    form.insert("client_id".into(), client_id.to_string());
+    let basic = client_secret
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|secret| {
+            format!(
+                "Basic {}",
+                BASE64.encode(format!("{client_id}:{secret}").as_bytes())
+            )
+        });
+    (basic, form)
+}
+
+fn persist_oauth2_tokens(
+    path: &Path,
+    account: &str,
+    access_token: &str,
+    refresh_token: Option<&str>,
+) -> Result<(), String> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| format!("Failed to read config for OAuth 2.0 persist: {e}"))?;
+    let mut doc: toml::Value = content
+        .parse()
+        .map_err(|e| format!("Failed to parse config for OAuth 2.0 persist: {e}"))?;
+    let accounts = doc
+        .get_mut("accounts")
+        .and_then(|v| v.as_table_mut())
+        .ok_or_else(|| "Config has no [accounts] table".to_string())?;
+    let acct = accounts
+        .get_mut(account)
+        .and_then(|v| v.as_table_mut())
+        .ok_or_else(|| format!("Account '{account}' not found in config"))?;
+    acct.insert(
+        "oauth2_access_token".into(),
+        toml::Value::String(access_token.to_string()),
+    );
+    if let Some(refresh) = refresh_token.filter(|s| !s.is_empty()) {
+        acct.insert(
+            "oauth2_refresh_token".into(),
+            toml::Value::String(refresh.to_string()),
+        );
+    }
+    let serialized = toml::to_string_pretty(&doc)
+        .map_err(|e| format!("Failed to serialize config after OAuth 2.0 persist: {e}"))?;
+    let tmp = path.with_extension("toml.tmp");
+    std::fs::write(&tmp, serialized)
+        .map_err(|e| format!("Failed to write temp config for OAuth 2.0 persist: {e}"))?;
+    let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+    std::fs::rename(&tmp, path)
+        .map_err(|e| format!("Failed to replace config after OAuth 2.0 persist: {e}"))?;
+    Ok(())
+}
+
 // --- Media types ---
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -193,8 +339,18 @@ pub struct MediaUploadResult {
 
 // --- API response types ---
 
+struct Oauth2Creds {
+    client_id: Option<String>,
+    client_secret: Option<String>,
+    access_token: Option<String>,
+    refresh_token: Option<String>,
+}
+
 pub struct XClient {
     config: AccountConfig,
+    oauth2: Mutex<Oauth2Creds>,
+    account: String,
+    config_path: Option<PathBuf>,
     http: Client,
 }
 
@@ -495,8 +651,25 @@ pub struct SearchTweetResult {
 // --- XClient implementation ---
 
 impl XClient {
-    pub fn new(config: AccountConfig, http: Client) -> Self {
-        Self { config, http }
+    pub fn new(
+        account: String,
+        config: AccountConfig,
+        http: Client,
+        config_path: Option<PathBuf>,
+    ) -> Self {
+        let oauth2 = Oauth2Creds {
+            client_id: config.oauth2_client_id.clone(),
+            client_secret: config.oauth2_client_secret.clone(),
+            access_token: config.oauth2_access_token.clone(),
+            refresh_token: config.oauth2_refresh_token.clone(),
+        };
+        Self {
+            config,
+            oauth2: Mutex::new(oauth2),
+            account,
+            config_path,
+            http,
+        }
     }
 
     // --- Shared helpers: response checking, URL building, GET/POST ---
@@ -588,6 +761,136 @@ impl XClient {
             .await
             .map_err(|e| format!("Failed to parse response: {e}"))?;
         Ok(r.data.result)
+    }
+
+    async fn post_bool_oauth2(&self, url: &str, body: &impl Serialize) -> Result<bool, String> {
+        let body = serde_json::to_value(body)
+            .map_err(|e| format!("Failed to serialize OAuth 2.0 request body: {e}"))?;
+        self.oauth2_bool(url, Some(&body)).await
+    }
+
+    async fn delete_bool_oauth2(&self, url: &str) -> Result<bool, String> {
+        self.oauth2_bool(url, None).await
+    }
+
+    async fn current_oauth2_access(&self) -> Result<String, String> {
+        let creds = self.oauth2.lock().await;
+        creds
+            .access_token
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .ok_or_else(|| self.config.bookmark_authorization().unwrap_err())
+    }
+
+    async fn oauth2_bool(
+        &self,
+        url: &str,
+        post_body: Option<&serde_json::Value>,
+    ) -> Result<bool, String> {
+        let mut access = self.current_oauth2_access().await?;
+        let mut refreshed = false;
+        loop {
+            let auth = format!("Bearer {access}");
+            let resp = if let Some(body) = post_body {
+                self.retry_503(|| {
+                    self.http
+                        .post(url)
+                        .header("Authorization", auth.clone())
+                        .json(body)
+                })
+                .await?
+            } else {
+                self.retry_503(|| self.http.delete(url).header("Authorization", auth.clone()))
+                    .await?
+            };
+            if resp.status().as_u16() == 401 && !refreshed {
+                access = self.refresh_oauth2_if_needed(&access).await?;
+                refreshed = true;
+                continue;
+            }
+            let resp = self.check_response(resp).await?;
+            let r: BoolResponse = resp
+                .json()
+                .await
+                .map_err(|e| format!("Failed to parse response: {e}"))?;
+            return Ok(r.data.result);
+        }
+    }
+
+    async fn refresh_oauth2_if_needed(&self, used_access: &str) -> Result<String, String> {
+        let mut creds = self.oauth2.lock().await;
+        let current = creds
+            .access_token
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or_default();
+        if current != used_access && !current.is_empty() {
+            return Ok(current.to_string());
+        }
+        self.refresh_oauth2_locked(&mut creds).await
+    }
+
+    async fn refresh_oauth2_locked(&self, creds: &mut Oauth2Creds) -> Result<String, String> {
+        let client_id = creds
+            .client_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                "Cannot refresh OAuth 2.0 user token: oauth2_client_id is missing".to_string()
+            })?;
+        let refresh_token = creds
+            .refresh_token
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                "Cannot refresh OAuth 2.0 user token: oauth2_refresh_token is missing".to_string()
+            })?;
+        let (basic, form) =
+            oauth2_refresh_parts(client_id, creds.client_secret.as_deref(), refresh_token);
+
+        let mut req = self
+            .http
+            .post(OAUTH2_TOKEN_URL)
+            .header("Content-Type", "application/x-www-form-urlencoded")
+            .form(&form);
+        if let Some(header) = &basic {
+            req = req.header("Authorization", header);
+        }
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| format!("OAuth 2.0 token refresh request failed: {e}"))?;
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        if !status.is_success() {
+            return Err(format!(
+                "OAuth 2.0 token refresh failed ({status}): {body}"
+            ));
+        }
+        let parsed = parse_oauth2_token_response(&body)?;
+        creds.access_token = Some(parsed.access_token.clone());
+        if let Some(refresh) = parsed.refresh_token.clone() {
+            creds.refresh_token = Some(refresh);
+        }
+        if let Some(path) = &self.config_path {
+            persist_oauth2_tokens(
+                path,
+                &self.account,
+                &parsed.access_token,
+                parsed.refresh_token.as_deref(),
+            )?;
+            tracing::info!("Refreshed OAuth 2.0 user token for {}", self.account);
+        } else {
+            tracing::warn!(
+                "OAuth 2.0 user token refreshed in memory only (no config file) for {}",
+                self.account
+            );
+        }
+        Ok(parsed.access_token)
     }
 
     fn map_tweet_list(response: TweetListResponse) -> SearchResult {
@@ -1329,12 +1632,13 @@ impl XClient {
 
     pub async fn bookmark_tweet(&self, user_id: &str, tweet_id: &str) -> Result<bool, String> {
         let url = format!("https://api.x.com/2/users/{user_id}/bookmarks");
-        self.post_bool(&url, &serde_json::json!({ "tweet_id": tweet_id })).await
+        self.post_bool_oauth2(&url, &serde_json::json!({ "tweet_id": tweet_id }))
+            .await
     }
 
     pub async fn unbookmark_tweet(&self, user_id: &str, tweet_id: &str) -> Result<bool, String> {
         let url = format!("https://api.x.com/2/users/{user_id}/bookmarks/{tweet_id}");
-        self.delete_bool(&url).await
+        self.delete_bool_oauth2(&url).await
     }
 
     // --- Trends ---
@@ -1990,6 +2294,188 @@ access_token_secret = "ts"
         let item = &resp.data.unwrap()[0];
         assert_eq!(item.name, "HelloWorld");
         assert_eq!(item.tweet_count, Some(999));
+    }
+
+    #[test]
+    fn config_parses_optional_oauth2_user_fields() {
+        let toml = r#"
+default_account = "codechap"
+
+[accounts.codechap]
+api_key = "k"
+api_key_secret = "s"
+access_token = "t"
+access_token_secret = "ts"
+oauth2_client_id = "cid"
+oauth2_access_token = "uat"
+oauth2_refresh_token = "urt"
+
+[accounts.securechap]
+api_key = "k2"
+api_key_secret = "s2"
+access_token = "t2"
+access_token_secret = "ts2"
+"#;
+        let cfg = AppConfig::from_toml(toml).unwrap();
+        let codechap = &cfg.accounts["codechap"];
+        assert_eq!(codechap.oauth2_user_token(), Some("uat"));
+        assert_eq!(codechap.oauth2_client_id.as_deref(), Some("cid"));
+        assert_eq!(codechap.oauth2_refresh_token.as_deref(), Some("urt"));
+        let securechap = &cfg.accounts["securechap"];
+        assert_eq!(securechap.oauth2_user_token(), None);
+    }
+
+    #[test]
+    fn oauth2_user_token_treats_blank_as_absent() {
+        let toml = r#"
+[accounts.testuser]
+api_key = "k"
+api_key_secret = "s"
+access_token = "t"
+access_token_secret = "ts"
+oauth2_access_token = "   "
+"#;
+        let cfg = AppConfig::from_toml(toml).unwrap();
+        assert_eq!(cfg.accounts["testuser"].oauth2_user_token(), None);
+    }
+
+    #[test]
+    fn debug_redacts_oauth2_user_fields() {
+        let cfg = AccountConfig {
+            api_key: "k".into(),
+            api_key_secret: "s".into(),
+            access_token: "t".into(),
+            access_token_secret: "ts".into(),
+            oauth2_client_id: Some("secret-client".into()),
+            oauth2_client_secret: Some("secret-cs".into()),
+            oauth2_access_token: Some("secret-at".into()),
+            oauth2_refresh_token: Some("secret-rt".into()),
+        };
+        let rendered = format!("{cfg:?}");
+        assert!(rendered.contains("***REDACTED***"));
+        assert!(!rendered.contains("secret-client"));
+        assert!(!rendered.contains("secret-at"));
+        assert!(!rendered.contains("secret-rt"));
+        assert!(!rendered.contains("secret-cs"));
+    }
+
+    #[test]
+    fn bookmark_auth_uses_oauth2_bearer_when_configured() {
+        let cfg = AccountConfig {
+            api_key: "k".into(),
+            api_key_secret: "s".into(),
+            access_token: "t".into(),
+            access_token_secret: "ts".into(),
+            oauth2_client_id: None,
+            oauth2_client_secret: None,
+            oauth2_access_token: Some("user-access-token".into()),
+            oauth2_refresh_token: None,
+        };
+        let header = cfg.bookmark_authorization().unwrap();
+        assert_eq!(header, "Bearer user-access-token");
+    }
+
+    #[test]
+    fn bookmark_auth_errors_without_oauth2_user_token() {
+        let cfg = AccountConfig {
+            api_key: "k".into(),
+            api_key_secret: "s".into(),
+            access_token: "t".into(),
+            access_token_secret: "ts".into(),
+            oauth2_client_id: None,
+            oauth2_client_secret: None,
+            oauth2_access_token: None,
+            oauth2_refresh_token: None,
+        };
+        let err = cfg.bookmark_authorization().unwrap_err();
+        assert!(err.contains("OAuth 2.0 User Context"));
+    }
+
+    #[test]
+    fn parse_oauth2_token_response_reads_access_and_refresh() {
+        let json = r#"{
+            "token_type": "bearer",
+            "expires_in": 7200,
+            "access_token": "new-access",
+            "refresh_token": "new-refresh",
+            "scope": "tweet.read users.read bookmark.write"
+        }"#;
+        let parsed = parse_oauth2_token_response(json).unwrap();
+        assert_eq!(parsed.access_token, "new-access");
+        assert_eq!(parsed.refresh_token.as_deref(), Some("new-refresh"));
+        assert_eq!(parsed.expires_in, Some(7200));
+    }
+
+    #[test]
+    fn parse_oauth2_token_response_allows_missing_refresh() {
+        let json = r#"{"access_token":"only-access"}"#;
+        let parsed = parse_oauth2_token_response(json).unwrap();
+        assert_eq!(parsed.access_token, "only-access");
+        assert_eq!(parsed.refresh_token, None);
+    }
+
+    #[test]
+    fn oauth2_refresh_uses_basic_auth_when_client_secret_present() {
+        let (basic, form) = oauth2_refresh_parts("cid", Some("csecret"), "rtok");
+        assert_eq!(
+            basic.as_deref(),
+            Some("Basic Y2lkOmNzZWNyZXQ=") // base64("cid:csecret")
+        );
+        assert_eq!(form.get("grant_type").map(String::as_str), Some("refresh_token"));
+        assert_eq!(form.get("refresh_token").map(String::as_str), Some("rtok"));
+        assert_eq!(form.get("client_id").map(String::as_str), Some("cid"));
+    }
+
+    #[test]
+    fn persist_oauth2_tokens_updates_one_account_only() {
+        let dir = std::env::temp_dir().join(format!(
+            "mcp-server-x-oauth2-persist-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(
+            &path,
+            r#"default_account = "codechap"
+
+[accounts.codechap]
+api_key = "k1"
+api_key_secret = "s1"
+access_token = "t1"
+access_token_secret = "ts1"
+oauth2_client_id = "cid"
+oauth2_access_token = "old-access"
+oauth2_refresh_token = "old-refresh"
+
+[accounts.securechap]
+api_key = "k2"
+api_key_secret = "s2"
+access_token = "t2"
+access_token_secret = "ts2"
+"#,
+        )
+        .unwrap();
+
+        persist_oauth2_tokens(&path, "codechap", "new-access", Some("new-refresh")).unwrap();
+
+        let updated = std::fs::read_to_string(&path).unwrap();
+        let cfg = AppConfig::from_toml(&updated).unwrap();
+        assert_eq!(
+            cfg.accounts["codechap"].oauth2_access_token.as_deref(),
+            Some("new-access")
+        );
+        assert_eq!(
+            cfg.accounts["codechap"].oauth2_refresh_token.as_deref(),
+            Some("new-refresh")
+        );
+        assert_eq!(cfg.accounts["codechap"].api_key, "k1");
+        assert!(cfg.accounts["securechap"].oauth2_access_token.is_none());
+        assert_eq!(cfg.accounts["securechap"].api_key, "k2");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

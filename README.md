@@ -110,6 +110,7 @@ Notes:
 - If you have multiple accounts, `default_account` is required
 - If you have one account, `default_account` is optional (auto-detected)
 - Multiple accounts can share the same `api_key`/`api_key_secret` (same X app). Only the `access_token`/`access_token_secret` differ per account.
+- `bookmark_tweet` / `unbookmark_tweet` require **OAuth 2.0 User Context** (`bookmark.write`). Add optional `oauth2_client_id`, `oauth2_client_secret`, `oauth2_access_token`, and `oauth2_refresh_token` on the account that needs bookmarks. OAuth 1.0a stays in use for every other tool. Generate the user token in the X Developer Console (App → Keys & Tokens → OAuth 2.0 Access Token) with `tweet.read`, `users.read`, `bookmark.read`, `bookmark.write`, and `offline.access`. Access tokens last ~2 hours; the server refreshes them with `oauth2_refresh_token` (and writes the rotated tokens back to `config.toml`).
 
 Secure it:
 
