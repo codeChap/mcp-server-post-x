@@ -3,7 +3,7 @@ mod params;
 mod server;
 
 use api::AppConfig;
-use rmcp::{ServiceExt, transport::stdio};
+use rmcp::{transport::stdio, ServiceExt};
 use server::XServer;
 use std::path::{Path, PathBuf};
 use tracing_subscriber::EnvFilter;
@@ -110,8 +110,8 @@ fn try_load_from_env() -> Option<AppConfig> {
     let access_token = env_prefer("X_ACCESS_TOKEN", "POST_X_ACCESS_TOKEN")?;
     let access_token_secret = env_prefer("X_ACCESS_TOKEN_SECRET", "POST_X_ACCESS_TOKEN_SECRET")?;
 
-    let account_name =
-        env_prefer("X_ACCOUNT_NAME", "POST_X_ACCOUNT_NAME").unwrap_or_else(|| "default".to_string());
+    let account_name = env_prefer("X_ACCOUNT_NAME", "POST_X_ACCOUNT_NAME")
+        .unwrap_or_else(|| "default".to_string());
 
     // Build a minimal TOML and reuse the existing validated parser. This guarantees
     // identical validation rules (no empty fields, etc.).

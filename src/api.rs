@@ -1,11 +1,11 @@
-use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine;
 use hmac::{Hmac, Mac};
-use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
+use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
 use rand::Rng;
 use reqwest::Client;
-use serde::{Deserialize, Serialize};
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::io::Read;
@@ -132,13 +132,11 @@ impl AccountConfig {
     pub fn bookmark_authorization(&self) -> Result<String, String> {
         match self.oauth2_user_token() {
             Some(token) => Ok(format!("Bearer {token}")),
-            None => Err(
-                "Bookmark write/delete requires OAuth 2.0 User Context. \
+            None => Err("Bookmark write/delete requires OAuth 2.0 User Context. \
                  Add oauth2_access_token for this account in config.toml \
                  (X Developer Console → App → Keys & Tokens → OAuth 2.0 Access Token, \
                  with bookmark.read + bookmark.write)."
-                    .into(),
-            ),
+                .into()),
         }
     }
 }
@@ -157,8 +155,8 @@ impl AppConfig {
             accounts: HashMap<String, AccountConfig>,
         }
 
-        let raw: RawConfig = toml::from_str(content)
-            .map_err(|e| format!("Failed to parse config: {e}"))?;
+        let raw: RawConfig =
+            toml::from_str(content).map_err(|e| format!("Failed to parse config: {e}"))?;
 
         if raw.accounts.is_empty() {
             return Err("[accounts] section is empty or missing".into());
@@ -171,8 +169,7 @@ impl AppConfig {
 
         let default_account = if let Some(da) = raw.default_account {
             if !raw.accounts.contains_key(&da) {
-                let available: Vec<&str> =
-                    raw.accounts.keys().map(|s| s.as_str()).collect();
+                let available: Vec<&str> = raw.accounts.keys().map(|s| s.as_str()).collect();
                 return Err(format!(
                     "default_account '{da}' not found in [accounts]. Available: {}",
                     available.join(", ")
@@ -182,8 +179,7 @@ impl AppConfig {
         } else if raw.accounts.len() == 1 {
             raw.accounts.keys().next().unwrap().clone()
         } else {
-            let available: Vec<&str> =
-                raw.accounts.keys().map(|s| s.as_str()).collect();
+            let available: Vec<&str> = raw.accounts.keys().map(|s| s.as_str()).collect();
             return Err(format!(
                 "Multiple accounts configured but no default_account specified. Available: {}",
                 available.join(", ")
@@ -512,7 +508,12 @@ struct BoolResponse {
 
 #[derive(Deserialize)]
 struct BoolData {
-    #[serde(alias = "liked", alias = "deleted", alias = "retweeted", alias = "bookmarked")]
+    #[serde(
+        alias = "liked",
+        alias = "deleted",
+        alias = "retweeted",
+        alias = "bookmarked"
+    )]
     result: bool,
 }
 
@@ -726,10 +727,7 @@ impl XClient {
         let resp = self
             .retry_503(|| {
                 let auth = self.oauth_header("POST", url, &BTreeMap::new());
-                self.http
-                    .post(url)
-                    .header("Authorization", auth)
-                    .json(body)
+                self.http.post(url).header("Authorization", auth).json(body)
             })
             .await?;
         self.check_response(resp).await
@@ -867,9 +865,7 @@ impl XClient {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
         if !status.is_success() {
-            return Err(format!(
-                "OAuth 2.0 token refresh failed ({status}): {body}"
-            ));
+            return Err(format!("OAuth 2.0 token refresh failed ({status}): {body}"));
         }
         let parsed = parse_oauth2_token_response(&body)?;
         creds.access_token = Some(parsed.access_token.clone());
@@ -1105,7 +1101,9 @@ impl XClient {
         }
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
-            return Err(format!("X API error ({status}) updating profile banner: {body}"));
+            return Err(format!(
+                "X API error ({status}) updating profile banner: {body}"
+            ));
         }
 
         // 200/201 success with (usually) empty body
@@ -1305,11 +1303,7 @@ impl XClient {
                 Err(e) => {
                     return ThreadResult {
                         posted,
-                        error: Some(format!(
-                            "Tweet {} of {} failed: {e}",
-                            i + 1,
-                            tweets.len()
-                        )),
+                        error: Some(format!("Tweet {} of {} failed: {e}", i + 1, tweets.len())),
                     };
                 }
             }
@@ -1459,7 +1453,8 @@ impl XClient {
 
     pub async fn like_tweet(&self, user_id: &str, tweet_id: &str) -> Result<bool, String> {
         let url = format!("https://api.x.com/2/users/{user_id}/likes");
-        self.post_bool(&url, &serde_json::json!({ "tweet_id": tweet_id })).await
+        self.post_bool(&url, &serde_json::json!({ "tweet_id": tweet_id }))
+            .await
     }
 
     pub async fn unlike_tweet(&self, user_id: &str, tweet_id: &str) -> Result<bool, String> {
@@ -1473,7 +1468,8 @@ impl XClient {
 
     pub async fn retweet(&self, user_id: &str, tweet_id: &str) -> Result<bool, String> {
         let url = format!("https://api.x.com/2/users/{user_id}/retweets");
-        self.post_bool(&url, &serde_json::json!({ "tweet_id": tweet_id })).await
+        self.post_bool(&url, &serde_json::json!({ "tweet_id": tweet_id }))
+            .await
     }
 
     pub async fn unretweet(&self, user_id: &str, tweet_id: &str) -> Result<bool, String> {
@@ -1486,7 +1482,10 @@ impl XClient {
     pub async fn follow_user(&self, user_id: &str, target_user_id: &str) -> Result<bool, String> {
         let url = format!("https://api.x.com/2/users/{user_id}/following");
         let resp = self
-            .post_json_raw(&url, &serde_json::json!({ "target_user_id": target_user_id }))
+            .post_json_raw(
+                &url,
+                &serde_json::json!({ "target_user_id": target_user_id }),
+            )
             .await?;
         let r: serde_json::Value = resp
             .json()
@@ -1495,11 +1494,7 @@ impl XClient {
         Ok(r["data"]["following"].as_bool().unwrap_or(false))
     }
 
-    pub async fn unfollow_user(
-        &self,
-        user_id: &str,
-        target_user_id: &str,
-    ) -> Result<bool, String> {
+    pub async fn unfollow_user(&self, user_id: &str, target_user_id: &str) -> Result<bool, String> {
         let url = format!("https://api.x.com/2/users/{user_id}/following/{target_user_id}");
         let resp = self.delete_raw(&url).await?;
         let r: serde_json::Value = resp
@@ -1531,9 +1526,8 @@ impl XClient {
         pagination_token: Option<&str>,
         exclude: Option<&str>,
     ) -> Result<SearchResult, String> {
-        let base_url = format!(
-            "https://api.x.com/2/users/{user_id}/timelines/reverse_chronological"
-        );
+        let base_url =
+            format!("https://api.x.com/2/users/{user_id}/timelines/reverse_chronological");
 
         let mut params = tweet_list_params(max_results);
         if let Some(token) = pagination_token {
@@ -1589,14 +1583,8 @@ impl XClient {
         })
     }
 
-    pub async fn send_dm(
-        &self,
-        conversation_id: &str,
-        text: &str,
-    ) -> Result<SendDmResult, String> {
-        let url = format!(
-            "https://api.x.com/2/dm_conversations/{conversation_id}/messages"
-        );
+    pub async fn send_dm(&self, conversation_id: &str, text: &str) -> Result<SendDmResult, String> {
+        let url = format!("https://api.x.com/2/dm_conversations/{conversation_id}/messages");
         let body = serde_json::json!({ "text": text });
 
         let resp = self.post_json_raw(&url, &body).await?;
@@ -1893,8 +1881,7 @@ impl XClient {
             params.insert("command".into(), "STATUS".into());
             params.insert("media_id".into(), media_id.to_string());
 
-            let response: ChunkedMediaResponse =
-                self.get_json(MEDIA_UPLOAD_URL, &params).await?;
+            let response: ChunkedMediaResponse = self.get_json(MEDIA_UPLOAD_URL, &params).await?;
 
             match response.processing_info {
                 Some(info) => match info.state.as_str() {
@@ -2054,11 +2041,7 @@ impl XClient {
         format!("OAuth {}", header_parts.join(", "))
     }
 
-    fn signature_base_string(
-        method: &str,
-        url: &str,
-        params: &BTreeMap<String, String>,
-    ) -> String {
+    fn signature_base_string(method: &str, url: &str, params: &BTreeMap<String, String>) -> String {
         let param_string: String = params
             .iter()
             .map(|(k, v)| format!("{}={}", pct_encode(k), pct_encode(v)))
@@ -2224,8 +2207,16 @@ access_token_secret = "ts"
     #[test]
     fn media_validation_rejects_mixing_video() {
         let infos = vec![
-            MediaInfo { mime: "image/jpeg".into(), media_type: MediaType::Image, max_size: 5<<20 },
-            MediaInfo { mime: "video/mp4".into(), media_type: MediaType::Video, max_size: 100<<20 },
+            MediaInfo {
+                mime: "image/jpeg".into(),
+                media_type: MediaType::Image,
+                max_size: 5 << 20,
+            },
+            MediaInfo {
+                mime: "video/mp4".into(),
+                media_type: MediaType::Video,
+                max_size: 100 << 20,
+            },
         ];
         let err = validate_media_combination(&infos).unwrap_err();
         assert!(err.contains("Videos cannot be mixed"));
@@ -2234,7 +2225,11 @@ access_token_secret = "ts"
     #[test]
     fn media_validation_rejects_more_than_four() {
         let infos = vec![
-            MediaInfo { mime: "image/jpeg".into(), media_type: MediaType::Image, max_size: 5<<20 };
+            MediaInfo {
+                mime: "image/jpeg".into(),
+                media_type: MediaType::Image,
+                max_size: 5 << 20
+            };
             5
         ];
         let err = validate_media_combination(&infos).unwrap_err();
@@ -2421,7 +2416,10 @@ oauth2_access_token = "   "
             basic.as_deref(),
             Some("Basic Y2lkOmNzZWNyZXQ=") // base64("cid:csecret")
         );
-        assert_eq!(form.get("grant_type").map(String::as_str), Some("refresh_token"));
+        assert_eq!(
+            form.get("grant_type").map(String::as_str),
+            Some("refresh_token")
+        );
         assert_eq!(form.get("refresh_token").map(String::as_str), Some("rtok"));
         assert_eq!(form.get("client_id").map(String::as_str), Some("cid"));
     }
@@ -2478,5 +2476,3 @@ access_token_secret = "ts2"
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
-
-

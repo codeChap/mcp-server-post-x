@@ -181,7 +181,9 @@ pub struct GetBookmarksParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct GetTrendsParams {
-    #[schemars(description = "Account name to use (omit for default account). Trends use the app credentials/rate limits associated with the chosen account.")]
+    #[schemars(
+        description = "Account name to use (omit for default account). Trends use the app credentials/rate limits associated with the chosen account."
+    )]
     pub account: Option<String>,
     #[schemars(
         description = "WOEID (Where On Earth ID) for the location. Omit or use 1 for Worldwide. Common values: 23424977 (United States), 23424975 (United Kingdom), 23424856 (Japan), 2459115 (New York), 44418 (London), 1118370 (Tokyo)"

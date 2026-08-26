@@ -19,8 +19,8 @@ use crate::params::{
 };
 use reqwest::Client;
 use rmcp::{
-    ErrorData as McpError, ServerHandler, handler::server::tool::ToolRouter,
-    handler::server::wrapper::Parameters, model::*, tool, tool_handler, tool_router,
+    handler::server::tool::ToolRouter, handler::server::wrapper::Parameters, model::*, tool,
+    tool_handler, tool_router, ErrorData as McpError, ServerHandler,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -278,7 +278,11 @@ impl XServer {
             return format!("No results found for \"{query}\".");
         }
 
-        let mut output = format!("Search results for \"{}\" ({} results):\n", query, tweets.len());
+        let mut output = format!(
+            "Search results for \"{}\" ({} results):\n",
+            query,
+            tweets.len()
+        );
         for (i, t) in tweets.iter().enumerate() {
             let author = t
                 .username
@@ -360,7 +364,9 @@ impl XServer {
 
     fn append_pagination(output: &mut String, next_token: &Option<String>) {
         if let Some(token) = next_token {
-            output.push_str(&format!("\nMore results available. Next page token: {token}"));
+            output.push_str(&format!(
+                "\nMore results available. Next page token: {token}"
+            ));
         }
     }
 }
@@ -457,8 +463,7 @@ impl XServer {
             )]));
         }
 
-        let (account, client, me) =
-            try_tool!(self.require_me_for(params.account.as_deref()).await);
+        let (account, client, me) = try_tool!(self.require_me_for(params.account.as_deref()).await);
 
         let media_attachments: Vec<MediaAttachment> = params
             .media
@@ -502,8 +507,7 @@ impl XServer {
             ));
         }
 
-        let (account, client, me) =
-            try_tool!(self.require_me_for(params.account.as_deref()).await);
+        let (account, client, me) = try_tool!(self.require_me_for(params.account.as_deref()).await);
 
         let tweets: Vec<(String, Vec<MediaAttachment>)> = params
             .tweets
@@ -689,9 +693,9 @@ impl XServer {
             .get_followers(&me.id, max_results, params.pagination_token.as_deref())
             .await;
 
-        Ok(Self::ok_or_err(
-            result.map(|r| Self::format_follows(&r.users, &r.next_token, "followers")),
-        ))
+        Ok(Self::ok_or_err(result.map(|r| {
+            Self::format_follows(&r.users, &r.next_token, "followers")
+        })))
     }
 
     #[tool(
@@ -710,9 +714,9 @@ impl XServer {
             .get_following(&me.id, max_results, params.pagination_token.as_deref())
             .await;
 
-        Ok(Self::ok_or_err(
-            result.map(|r| Self::format_follows(&r.users, &r.next_token, "following")),
-        ))
+        Ok(Self::ok_or_err(result.map(|r| {
+            Self::format_follows(&r.users, &r.next_token, "following")
+        })))
     }
 
     #[tool(
@@ -728,9 +732,9 @@ impl XServer {
         let max_users = params.max_users.unwrap_or(5000).clamp(1, 10000);
         let result = client.get_all_following(&me.id, max_users).await;
 
-        Ok(Self::ok_or_err(
-            result.map(|users| Self::format_all_follows(&users, "following")),
-        ))
+        Ok(Self::ok_or_err(result.map(|users| {
+            Self::format_all_follows(&users, "following")
+        })))
     }
 
     #[tool(
@@ -746,9 +750,9 @@ impl XServer {
         let max_users = params.max_users.unwrap_or(5000).clamp(1, 10000);
         let result = client.get_all_followers(&me.id, max_users).await;
 
-        Ok(Self::ok_or_err(
-            result.map(|users| Self::format_all_follows(&users, "followers")),
-        ))
+        Ok(Self::ok_or_err(result.map(|users| {
+            Self::format_all_follows(&users, "followers")
+        })))
     }
 
     #[tool(
@@ -794,7 +798,10 @@ impl XServer {
                 .unfollow_user(&me.id, &target_id)
                 .await
                 .map(|following| {
-                    format!("Unfollowed user {} (following: {following})", params.user.trim())
+                    format!(
+                        "Unfollowed user {} (following: {following})",
+                        params.user.trim()
+                    )
                 }),
         ))
     }
@@ -828,7 +835,9 @@ impl XServer {
             client.lookup_user_by_username(user).await
         };
 
-        Ok(Self::ok_or_err(result.map(|p| Self::format_user_profile(&p))))
+        Ok(Self::ok_or_err(
+            result.map(|p| Self::format_user_profile(&p)),
+        ))
     }
 
     #[tool(description = "Like a tweet on X (Twitter). Accepts a tweet ID or tweet URL.")]
@@ -878,12 +887,9 @@ impl XServer {
 
         let (_account, client) = try_tool!(self.require_account(params.account.as_deref()));
 
-        Ok(Self::ok_or_err(
-            client
-                .delete_tweet(tweet_id)
-                .await
-                .map(|deleted| format!("Tweet {tweet_id} deleted: {deleted}")),
-        ))
+        Ok(Self::ok_or_err(client.delete_tweet(tweet_id).await.map(
+            |deleted| format!("Tweet {tweet_id} deleted: {deleted}"),
+        )))
     }
 
     #[tool(description = "Retweet a tweet on X (Twitter). Accepts a tweet ID or tweet URL.")]
@@ -896,12 +902,9 @@ impl XServer {
         let (_account, client, me) =
             try_tool!(self.require_me_for(params.account.as_deref()).await);
 
-        Ok(Self::ok_or_err(
-            client
-                .retweet(&me.id, tweet_id)
-                .await
-                .map(|retweeted| format!("Tweet {tweet_id} retweeted: {retweeted}")),
-        ))
+        Ok(Self::ok_or_err(client.retweet(&me.id, tweet_id).await.map(
+            |retweeted| format!("Tweet {tweet_id} retweeted: {retweeted}"),
+        )))
     }
 
     #[tool(description = "Undo a retweet on X (Twitter). Accepts a tweet ID or tweet URL.")]
@@ -954,7 +957,9 @@ impl XServer {
             client
                 .unbookmark_tweet(&me.id, tweet_id)
                 .await
-                .map(|bookmarked| format!("Tweet {tweet_id} unbookmarked (bookmarked: {bookmarked})")),
+                .map(|bookmarked| {
+                    format!("Tweet {tweet_id} unbookmarked (bookmarked: {bookmarked})")
+                }),
         ))
     }
 
@@ -985,9 +990,9 @@ impl XServer {
             )
             .await;
 
-        Ok(Self::ok_or_err(
-            result.map(|r| Self::format_search_results(query, &r.tweets, &r.next_token)),
-        ))
+        Ok(Self::ok_or_err(result.map(|r| {
+            Self::format_search_results(query, &r.tweets, &r.next_token)
+        })))
     }
 
     #[tool(
@@ -1011,9 +1016,9 @@ impl XServer {
             )
             .await;
 
-        Ok(Self::ok_or_err(
-            result.map(|r| Self::format_search_results("timeline", &r.tweets, &r.next_token)),
-        ))
+        Ok(Self::ok_or_err(result.map(|r| {
+            Self::format_search_results("timeline", &r.tweets, &r.next_token)
+        })))
     }
 
     #[tool(
@@ -1032,9 +1037,9 @@ impl XServer {
             .get_bookmarks(&me.id, max_results, params.pagination_token.as_deref())
             .await;
 
-        Ok(Self::ok_or_err(
-            result.map(|r| Self::format_search_results("bookmarks", &r.tweets, &r.next_token)),
-        ))
+        Ok(Self::ok_or_err(result.map(|r| {
+            Self::format_search_results("bookmarks", &r.tweets, &r.next_token)
+        })))
     }
 
     #[tool(
